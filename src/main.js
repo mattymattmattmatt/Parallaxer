@@ -109,7 +109,7 @@ async function loadORT() {
     }
   }
 
-  const modelUrl = new URL('models/model-small.onnx', ASSET_BASE_URL).toString();
+  const modelUrl = `${BASE}models/model-small.onnx`;
   session = await ort.InferenceSession.create(modelUrl, {
     executionProviders: ortBackend === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm'],
     graphOptimizationLevel: 'all'
