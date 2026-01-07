@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Parallaxer</title>
+    <link rel="icon" href="favicon.ico" />
+    <script type="module" crossorigin src="/Parallaxer/assets/index-BPbIdGXu.js"></script>
+    <link rel="stylesheet" crossorigin href="/Parallaxer/assets/index-focijgoP.css">
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div class="brand">
+          <img class="logo" src="ParallaxerLogo.png" alt="Parallaxer logo" />
+          <div>
+            <div class="title">Parallaxer</div>
+            <div class="subtitle">Browser-only Side-by-Side 3D (Depth + ffmpeg.wasm)</div>
+          </div>
+        </div>
+        <div class="pill">Local · Private · No Uploads</div>
+      </header>
+
+      <main class="grid">
+        <section class="card">
+          <h2>1) Input</h2>
+          <p class="muted">
+            Select a video file. Processing is CPU/GPU intensive; start with a short clip (5–10s).
+          </p>
+
+          <label class="file">
+            <input id="file" type="file" accept="video/*" />
+            <span id="fileLabel">Choose a video…</span>
+          </label>
+          <div class="fileMeta" id="fileMeta">No file selected.</div>
+
+          <div class="row">
+            <div class="field">
+              <label for="fps">Frame rate (processing)</label>
+              <input id="fps" type="number" min="1" max="30" value="8" inputmode="numeric" />
+            </div>
+            <div class="field">
+              <label for="maxW">Max width (downscale)</label>
+              <input id="maxW" type="number" min="240" max="1920" value="512" inputmode="numeric" />
+            </div>
+          </div>
+
+          <div class="row">
+            <div class="field">
+              <label for="strength">Depth strength</label>
+              <input id="strength" type="number" min="1" max="40" value="12" inputmode="numeric" aria-describedby="strengthHint" />
+              <div class="hint" id="strengthHint">Higher = more 3D, more artifacts.</div>
+            </div>
+            <div class="field">
+              <label for="maxFrames">Max frames</label>
+              <input id="maxFrames" type="number" min="1" max="9999" value="120" inputmode="numeric" aria-describedby="maxFramesHint" />
+              <div class="hint" id="maxFramesHint">Limit to avoid memory crashes.</div>
+            </div>
+          </div>
+
+          <h3>Output settings</h3>
+          <div class="row">
+            <div class="field">
+              <label for="crf">Quality (CRF)</label>
+              <input id="crf" type="number" min="12" max="30" value="18" inputmode="numeric" aria-describedby="crfHint" />
+              <div class="hint" id="crfHint">Lower = larger file, higher quality.</div>
+            </div>
+            <div class="field">
+              <label for="preset">Encoding speed</label>
+              <select id="preset" class="select">
+                <option value="ultrafast">Ultrafast</option>
+                <option value="superfast">Superfast</option>
+                <option value="veryfast" selected>Veryfast</option>
+                <option value="faster">Faster</option>
+                <option value="fast">Fast</option>
+                <option value="medium">Medium</option>
+              </select>
+              <div class="hint">Faster = bigger file, slower = smaller file.</div>
+            </div>
+          </div>
+          <label class="check">
+            <input id="includeAudio" type="checkbox" checked />
+            <span>Include original audio (if present)</span>
+          </label>
+
+          <div class="actions">
+            <button id="loadBtn" class="btn secondary">Load Engines</button>
+            <button id="runBtn" class="btn primary" disabled>Generate SBS MP4</button>
+          </div>
+
+          <div class="barWrap">
+            <div class="bar" id="bar" style="width:0%"></div>
+          </div>
+          <div class="status" id="status" role="status" aria-live="polite">Idle.</div>
+        </section>
+
+        <section class="card">
+          <h2>2) Output</h2>
+          <p class="muted">
+            When finished, download the SBS video. This creates a standard SBS layout (left|right).
+          </p>
+
+          <div class="output">
+            <a id="download" class="btn primary" download="Parallaxer_SBS.mp4" style="display:none;">Download SBS MP4</a>
+            <video id="preview" controls playsinline style="display:none;"></video>
+          </div>
+
+          <h3>Log</h3>
+          <pre id="log" class="log" aria-live="polite" aria-label="Processing log"></pre>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <div class="muted">
+          This browser version uses in-browser inference + WebAssembly encoding. Long/high-res videos may be slow.
+        </div>
+      </footer>
+    </div>
+
+  </body>
+</html>
+
