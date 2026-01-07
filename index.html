@@ -33,25 +33,25 @@
 
           <div class="row">
             <div class="field">
-              <label>Frame rate (processing)</label>
-              <input id="fps" type="number" min="1" max="30" value="8" />
+              <label for="fps">Frame rate (processing)</label>
+              <input id="fps" type="number" min="1" max="30" value="8" inputmode="numeric" />
             </div>
             <div class="field">
-              <label>Max width (downscale)</label>
-              <input id="maxW" type="number" min="240" max="1920" value="512" />
+              <label for="maxW">Max width (downscale)</label>
+              <input id="maxW" type="number" min="240" max="1920" value="512" inputmode="numeric" />
             </div>
           </div>
 
           <div class="row">
             <div class="field">
-              <label>Depth strength</label>
-              <input id="strength" type="number" min="1" max="40" value="12" />
-              <div class="hint">Higher = more 3D, more artifacts.</div>
+              <label for="strength">Depth strength</label>
+              <input id="strength" type="number" min="1" max="40" value="12" inputmode="numeric" aria-describedby="strengthHint" />
+              <div class="hint" id="strengthHint">Higher = more 3D, more artifacts.</div>
             </div>
             <div class="field">
-              <label>Max frames</label>
-              <input id="maxFrames" type="number" min="1" max="9999" value="120" />
-              <div class="hint">Limit to avoid memory crashes.</div>
+              <label for="maxFrames">Max frames</label>
+              <input id="maxFrames" type="number" min="1" max="9999" value="120" inputmode="numeric" aria-describedby="maxFramesHint" />
+              <div class="hint" id="maxFramesHint">Limit to avoid memory crashes.</div>
             </div>
           </div>
 
@@ -63,7 +63,7 @@
           <div class="barWrap">
             <div class="bar" id="bar" style="width:0%"></div>
           </div>
-          <div class="status" id="status">Idle.</div>
+          <div class="status" id="status" role="status" aria-live="polite">Idle.</div>
         </section>
 
         <section class="card">
@@ -78,7 +78,7 @@
           </div>
 
           <h3>Log</h3>
-          <pre id="log" class="log"></pre>
+          <pre id="log" class="log" aria-live="polite" aria-label="Processing log"></pre>
         </section>
       </main>
 

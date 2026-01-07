@@ -25,9 +25,19 @@ const previewEl = $('preview');
 const BASE = import.meta.env.BASE_URL;
 
 // ---------- Helpers ----------
+const MAX_LOG_LINES = 400;
+const logBuffer = [];
+
 function log(line) {
-  logEl.textContent += line + '\n';
+  logBuffer.push(line);
+  if (logBuffer.length > MAX_LOG_LINES) logBuffer.shift();
+  logEl.textContent = logBuffer.join('\n');
   logEl.scrollTop = logEl.scrollHeight;
+}
+
+function clearLog() {
+  logBuffer.length = 0;
+  logEl.textContent = '';
 }
 
 function setStatus(text) {
@@ -45,6 +55,19 @@ function clamp(v, lo, hi) {
 
 async function blobToU8(blob) {
   return new Uint8Array(await blob.arrayBuffer());
+}
+
+function resetOutput() {
+  downloadEl.style.display = 'none';
+  downloadEl.removeAttribute('href');
+  previewEl.style.display = 'none';
+  previewEl.removeAttribute('src');
+}
+
+function setControlsDisabled(disabled) {
+  [fileEl, fpsEl, maxWEl, strengthEl, maxFramesEl].forEach((el) => {
+    if (el) el.disabled = disabled;
+  });
 }
 
 // ---------- FFmpeg (WASM) ----------
@@ -77,8 +100,12 @@ async function loadORT() {
     ort = await import('onnxruntime-web/webgpu');
     ortBackend = 'webgpu';
   } catch {
-    ort = await import('onnxruntime-web');
-    ortBackend = 'wasm';
+    try {
+      ort = await import('onnxruntime-web');
+      ortBackend = 'wasm';
+    } catch (err) {
+      throw new Error(`Failed to load ONNX Runtime. ${err?.message || err}`);
+    }
   }
 
   const modelUrl = `${BASE}models/midas-small.onnx`;
@@ -203,14 +230,16 @@ async function imageDataToPNGBytes(imgData) {
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.putImageData(imgData, 0, 0);
   const blob = await new Promise((res) => c.toBlob(res, 'image/png'));
-  return blobToU8(blob);
+  if (blob) return blobToU8(blob);
+
+  const dataUrl = c.toDataURL('image/png');
+  const fallback = await fetch(dataUrl).then((res) => res.blob());
+  return blobToU8(fallback);
 }
 
 // ---------- Pipeline ----------
 async function generateSBS(file) {
-  downloadEl.style.display = 'none';
-  previewEl.style.display = 'none';
-  previewEl.removeAttribute('src');
+  resetOutput();
 
   const fps = clamp(parseInt(fpsEl.value, 10) || 8, 1, 30);
   const maxW = clamp(parseInt(maxWEl.value, 10) || 512, 240, 1920);
@@ -327,7 +356,13 @@ async function generateSBS(file) {
 // ---------- UI ----------
 fileEl.addEventListener('change', () => {
   const f = fileEl.files?.[0];
+  resetOutput();
   if (!f) return;
+  if (!f.type.startsWith('video/')) {
+    setStatus('Please choose a valid video file.');
+    fileEl.value = '';
+    return;
+  }
   fileLabel.textContent = `${f.name} (${Math.round(f.size / (1024 * 1024))} MB)`;
   runBtn.disabled = !ffmpegLoaded || !session;
 });
@@ -335,27 +370,40 @@ fileEl.addEventListener('change', () => {
 loadBtn.addEventListener('click', async () => {
   try {
     loadBtn.disabled = true;
+    runBtn.disabled = true;
+    setControlsDisabled(true);
     setStatus('Loading engines…');
-    logEl.textContent = '';
+    clearLog();
     log('Loading FFmpeg core…');
     await loadFFmpeg();
     log('Loading ONNX Runtime + MiDaS…');
     await loadORT();
     setStatus('Engines loaded. Choose a file and generate.');
+    setControlsDisabled(false);
     runBtn.disabled = !fileEl.files?.[0];
   } catch (e) {
     setStatus(`Error: ${e.message || e}`);
     loadBtn.disabled = false;
+    setControlsDisabled(false);
   }
 });
 
 runBtn.addEventListener('click', async () => {
   const f = fileEl.files?.[0];
   if (!f) return;
+  if (!ffmpegLoaded || !session) {
+    setStatus('Engines not loaded yet. Click "Load Engines" first.');
+    return;
+  }
+  if (!f.type.startsWith('video/')) {
+    setStatus('Please choose a valid video file.');
+    return;
+  }
 
   try {
     runBtn.disabled = true;
     loadBtn.disabled = true;
+    setControlsDisabled(true);
     log('---');
     log(`Starting Parallaxer… (ORT backend: ${ortBackend})`);
     await generateSBS(f);
@@ -365,5 +413,6 @@ runBtn.addEventListener('click', async () => {
   } finally {
     runBtn.disabled = false;
     loadBtn.disabled = false;
+    setControlsDisabled(false);
   }
 });
