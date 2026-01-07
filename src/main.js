@@ -23,6 +23,7 @@ const previewEl = $('preview');
 
 // Vite base URL (handles GitHub Pages subpaths)
 const BASE = import.meta.env.BASE_URL;
+const ASSET_BASE_URL = new URL(BASE, window.location.origin);
 
 // ---------- Helpers ----------
 const MAX_LOG_LINES = 400;
@@ -78,9 +79,9 @@ async function loadFFmpeg() {
   if (ffmpegLoaded) return;
 
   await ffmpeg.load({
-    coreURL: `${BASE}ffmpeg/ffmpeg-core.js`,
-    wasmURL: `${BASE}ffmpeg/ffmpeg-core.wasm`,
-    workerURL: `${BASE}ffmpeg/ffmpeg-core.worker.js`
+    coreURL: new URL('ffmpeg/ffmpeg-core.js', ASSET_BASE_URL).toString(),
+    wasmURL: new URL('ffmpeg/ffmpeg-core.wasm', ASSET_BASE_URL).toString(),
+    workerURL: new URL('ffmpeg/ffmpeg-core.worker.js', ASSET_BASE_URL).toString()
   });
 
   ffmpeg.on('log', ({ message }) => log(`[ffmpeg] ${message}`));
@@ -108,7 +109,7 @@ async function loadORT() {
     }
   }
 
-  const modelUrl = `${BASE}models/midas-small.onnx`;
+  const modelUrl = new URL('models/model-small.onnx', ASSET_BASE_URL).toString();
   session = await ort.InferenceSession.create(modelUrl, {
     executionProviders: ortBackend === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm'],
     graphOptimizationLevel: 'all'
