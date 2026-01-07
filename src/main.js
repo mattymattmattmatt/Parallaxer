@@ -71,12 +71,6 @@ function setControlsDisabled(disabled) {
   });
 }
 
-function assertHttpServing() {
-  if (window.location.protocol === 'file:') {
-    throw new Error('This app must be served over http(s). Run "npm run dev" or "npm run preview" instead of opening index.html directly.');
-  }
-}
-
 // ---------- FFmpeg (WASM) ----------
 const ffmpeg = new FFmpeg();
 let ffmpegLoaded = false;
@@ -84,11 +78,11 @@ let ffmpegLoaded = false;
 async function loadFFmpeg() {
   if (ffmpegLoaded) return;
 
-  const coreURL = new URL('ffmpeg/ffmpeg-core.js', ASSET_BASE_URL).toString();
-  const wasmURL = new URL('ffmpeg/ffmpeg-core.wasm', ASSET_BASE_URL).toString();
-  const workerURL = new URL('ffmpeg/ffmpeg-core.worker.js', ASSET_BASE_URL).toString();
-
-  await ffmpeg.load({ coreURL, wasmURL, workerURL });
+  await ffmpeg.load({
+    coreURL: new URL('ffmpeg/ffmpeg-core.js', ASSET_BASE_URL).toString(),
+    wasmURL: new URL('ffmpeg/ffmpeg-core.wasm', ASSET_BASE_URL).toString(),
+    workerURL: new URL('ffmpeg/ffmpeg-core.worker.js', ASSET_BASE_URL).toString()
+  });
 
   ffmpeg.on('log', ({ message }) => log(`[ffmpeg] ${message}`));
   ffmpeg.on('progress', ({ progress }) => setProgress(progress));
@@ -115,7 +109,7 @@ async function loadORT() {
     }
   }
 
-  const modelUrl = new URL('models/model-small.onnx', ASSET_BASE_URL).toString();
+  const modelUrl = `${BASE}models/model-small.onnx`;
   session = await ort.InferenceSession.create(modelUrl, {
     executionProviders: ortBackend === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm'],
     graphOptimizationLevel: 'all'
@@ -376,7 +370,6 @@ fileEl.addEventListener('change', () => {
 
 loadBtn.addEventListener('click', async () => {
   try {
-    assertHttpServing();
     loadBtn.disabled = true;
     runBtn.disabled = true;
     setControlsDisabled(true);
