@@ -13,6 +13,10 @@ const fpsEl = $('fps');
 const maxWEl = $('maxW');
 const strengthEl = $('strength');
 const maxFramesEl = $('maxFrames');
+const crfEl = $('crf');
+const presetEl = $('preset');
+const includeAudioEl = $('includeAudio');
+const fileMetaEl = $('fileMeta');
 
 const barEl = $('bar');
 const statusEl = $('status');
@@ -66,7 +70,7 @@ function resetOutput() {
 }
 
 function setControlsDisabled(disabled) {
-  [fileEl, fpsEl, maxWEl, strengthEl, maxFramesEl].forEach((el) => {
+  [fileEl, fpsEl, maxWEl, strengthEl, maxFramesEl, crfEl, presetEl, includeAudioEl].forEach((el) => {
     if (el) el.disabled = disabled;
   });
 }
@@ -95,6 +99,80 @@ async function loadFFmpeg() {
 let ort = null;
 let session = null;
 let ortBackend = 'wasm';
+let currentVideoMeta = null;
+
+const numberFormatter = new Intl.NumberFormat();
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds)) return 'Unknown duration';
+  const rounded = Math.max(0, Math.floor(seconds));
+  const hrs = Math.floor(rounded / 3600);
+  const mins = Math.floor((rounded % 3600) / 60);
+  const secs = rounded % 60;
+  if (hrs > 0) return `${hrs}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  return `${mins}:${String(secs).padStart(2, '0')}`;
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return 'Unknown size';
+  const mb = bytes / (1024 * 1024);
+  return `${mb.toFixed(1)} MB`;
+}
+
+function updateFileMetaDisplay() {
+  if (!currentVideoMeta) {
+    fileMetaEl.textContent = 'No file selected.';
+    return;
+  }
+
+  const fps = clamp(parseInt(fpsEl.value, 10) || 8, 1, 30);
+  const maxFrames = clamp(parseInt(maxFramesEl.value, 10) || 120, 1, 9999);
+  const { duration, width, height, size } = currentVideoMeta;
+  const estimatedFrames = Number.isFinite(duration) ? Math.ceil(duration * fps) : null;
+
+  const lines = [
+    `Duration: ${formatDuration(duration)}`,
+    `Resolution: ${width && height ? `${width}×${height}` : 'Unknown resolution'}`,
+    `File size: ${formatBytes(size)}`
+  ];
+
+  if (estimatedFrames) {
+    lines.push(`Estimated frames @ ${fps} fps: ${numberFormatter.format(estimatedFrames)}`);
+    if (estimatedFrames > maxFrames) {
+      lines.push(`Will process ${numberFormatter.format(maxFrames)} of ${numberFormatter.format(estimatedFrames)} frames.`);
+    }
+  }
+
+  fileMetaEl.textContent = lines.join('\n');
+}
+
+async function readVideoMetadata(file) {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    const url = URL.createObjectURL(file);
+    const cleanup = () => {
+      URL.revokeObjectURL(url);
+      video.removeAttribute('src');
+      video.load();
+    };
+    video.onloadedmetadata = () => {
+      const meta = {
+        duration: video.duration,
+        width: video.videoWidth,
+        height: video.videoHeight,
+        size: file.size
+      };
+      cleanup();
+      resolve(meta);
+    };
+    video.onerror = () => {
+      cleanup();
+      reject(new Error('Unable to read metadata'));
+    };
+    video.src = url;
+  });
+}
 
 async function loadORT() {
   try {
@@ -246,10 +324,13 @@ async function generateSBS(file) {
   const maxW = clamp(parseInt(maxWEl.value, 10) || 512, 240, 1920);
   const strength = clamp(parseInt(strengthEl.value, 10) || 12, 1, 40);
   const maxFrames = clamp(parseInt(maxFramesEl.value, 10) || 120, 1, 9999);
+  const crf = clamp(parseInt(crfEl.value, 10) || 18, 12, 30);
+  const preset = presetEl.value || 'veryfast';
+  const includeAudio = includeAudioEl.checked;
 
   setProgress(0);
   setStatus('Writing input…');
-  log(`Parallaxer settings: fps=${fps}, maxW=${maxW}, strength=${strength}px, maxFrames=${maxFrames}`);
+  log(`Parallaxer settings: fps=${fps}, maxW=${maxW}, strength=${strength}px, maxFrames=${maxFrames}, crf=${crf}, preset=${preset}, audio=${includeAudio ? 'on' : 'off'}`);
 
   try { await ffmpeg.deleteFile('/input.mp4'); } catch {}
   for (const dir of ['/frames', '/L', '/R']) {
@@ -282,6 +363,9 @@ async function generateSBS(file) {
   const framesToProcess = frameNames.slice(0, maxFrames);
 
   log(`Frames extracted: ${frameNames.length}. Processing: ${framesToProcess.length}.`);
+  if (framesToProcess.length < frameNames.length) {
+    log(`Frame limit reached. Skipping ${frameNames.length - framesToProcess.length} frames.`);
+  }
   setStatus('Depth + right-eye synthesis…');
 
   for (let i = 0; i < framesToProcess.length; i++) {
@@ -324,18 +408,36 @@ async function generateSBS(file) {
   setStatus('Encoding SBS video…');
   setProgress(0.82);
 
-  const rc2 = await ffmpeg.exec([
+  const encodeArgs = [
     '-framerate', String(fps),
     '-i', '/L/%05d.png',
     '-framerate', String(fps),
-    '-i', '/R/%05d.png',
-    '-filter_complex', '[0:v][1:v]hstack=inputs=2',
+    '-i', '/R/%05d.png'
+  ];
+
+  if (includeAudio) {
+    encodeArgs.push('-i', '/input.mp4');
+  }
+
+  encodeArgs.push(
+    '-filter_complex', '[0:v][1:v]hstack=inputs=2[v]',
+    '-map', '[v]'
+  );
+
+  if (includeAudio) {
+    encodeArgs.push('-map', '2:a?', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+  }
+
+  encodeArgs.push(
     '-c:v', 'libx264',
     '-pix_fmt', 'yuv420p',
-    '-crf', '18',
-    '-preset', 'veryfast',
+    '-crf', String(crf),
+    '-preset', preset,
+    '-movflags', '+faststart',
     '/Parallaxer_SBS.mp4'
-  ]);
+  );
+
+  const rc2 = await ffmpeg.exec(encodeArgs);
   if (rc2 !== 0) throw new Error('FFmpeg encode failed.');
 
   const out = await ffmpeg.readFile('/Parallaxer_SBS.mp4');
@@ -355,17 +457,35 @@ async function generateSBS(file) {
 }
 
 // ---------- UI ----------
-fileEl.addEventListener('change', () => {
+fileEl.addEventListener('change', async () => {
   const f = fileEl.files?.[0];
   resetOutput();
   if (!f) return;
   if (!f.type.startsWith('video/')) {
     setStatus('Please choose a valid video file.');
     fileEl.value = '';
+    currentVideoMeta = null;
+    updateFileMetaDisplay();
     return;
   }
   fileLabel.textContent = `${f.name} (${Math.round(f.size / (1024 * 1024))} MB)`;
   runBtn.disabled = !ffmpegLoaded || !session;
+  fileMetaEl.textContent = 'Reading metadata…';
+
+  try {
+    currentVideoMeta = await readVideoMetadata(f);
+  } catch {
+    currentVideoMeta = null;
+    fileMetaEl.textContent = 'Unable to read metadata for this file.';
+    return;
+  }
+  updateFileMetaDisplay();
+});
+
+[fpsEl, maxFramesEl].forEach((el) => {
+  el.addEventListener('input', () => {
+    updateFileMetaDisplay();
+  });
 });
 
 loadBtn.addEventListener('click', async () => {
