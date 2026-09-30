@@ -244,6 +244,56 @@ export class StereoRenderer {
     return out;
   }
 
+  /**
+   * Like readModelInput, but without stalling: the copy goes into a pixel-pack buffer and is fetched once a
+   * fence says the GPU got there. GL executes commands in order, so later uploads can't disturb the snapshot.
+   */
+  readModelInputAsync(w, h) {
+    const gl = this.gl;
+    const t = this.#target('modelIn', w, h, this.#rgba);
+    const u = this.#use('copy');
+    this.#bind(0, (this.staged ? this.back : this.color).tex, u.uTex);
+    this.#draw(t);
+    const bytes = w * h * 4;
+    this.pbos ??= [];
+    let pbo = this.pbos.find((p) => !p.busy && p.bytes === bytes);
+    if (!pbo) {
+      pbo = { buf: gl.createBuffer(), bytes, busy: false };
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo.buf);
+      gl.bufferData(gl.PIXEL_PACK_BUFFER, bytes, gl.STREAM_READ);
+      this.pbos.push(pbo);
+    }
+    pbo.busy = true;
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo.buf);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    gl.flush();
+    return new Promise((resolve, reject) => {
+      const poll = () => {
+        if (gl.isContextLost()) {
+          pbo.busy = false;
+          reject(new Error('The WebGL context was lost.'));
+          return;
+        }
+        const status = gl.clientWaitSync(sync, 0, 0);
+        if (status === gl.TIMEOUT_EXPIRED) {
+          setTimeout(poll, 1);
+          return;
+        }
+        gl.deleteSync(sync);
+        const out = new Uint8Array(bytes);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo.buf);
+        gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, out);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+        pbo.busy = false;
+        if (status === gl.WAIT_FAILED) reject(new Error('GPU readback failed.'));
+        else resolve(out);
+      };
+      setTimeout(poll, 0);
+    });
+  }
+
   /** Upload a normalised nearness map (1 = closest) produced by the depth stage. */
   uploadDepth(data, w, h) {
     const gl = this.gl;

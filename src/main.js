@@ -33,6 +33,8 @@ const app = {
   engineInfo,
   ensureEngine,
   isModelCached: (m) => (m.local ? Promise.resolve(true) : isModelCached(m)),
+  gpu: () => gpu,
+  currentModel: () => currentModel(),
   currentTime: () => video.currentTime,
   pausePlayback: () => video.pause(),
   bitmapFor: async (item) => {

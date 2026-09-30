@@ -12,6 +12,8 @@ export default defineConfig({
   server: { headers: isolationHeaders },
   preview: { headers: isolationHeaders },
   optimizeDeps: { exclude: ['onnxruntime-web'] },
+  // Depth workers are ES modules: they lazy-load ONNX Runtime and locate its WASM via import.meta.url.
+  worker: { format: 'es' },
   build: {
     target: 'es2022',
     assetsInlineLimit: 0,

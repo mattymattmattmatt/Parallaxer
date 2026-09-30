@@ -1989,3 +1989,82 @@ kbd {
 .confirm-msg .ico {
   color: var(--warn);
 }
+
+/* Parallel export: worker status */
+.workers {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.workers-title {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  margin-right: 2px;
+}
+.wchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  background: var(--bg);
+  font: 500 11px/1 var(--mono);
+  color: var(--text-2);
+}
+.wchip b {
+  color: var(--text);
+  font-weight: 600;
+}
+.wchip .wframes {
+  color: var(--text-3);
+}
+.wdot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+.wchip.ready .wdot {
+  background: var(--ok);
+  box-shadow: 0 0 6px var(--ok);
+}
+.wchip.starting .wdot {
+  background: var(--warn);
+  animation: pulse 1s infinite;
+}
+.wchip.failed {
+  border-color: rgba(255, 93, 108, 0.4);
+}
+.wchip.failed .wdot {
+  background: var(--bad);
+}
+.wchip.retired,
+.wchip.retiring {
+  opacity: 0.55;
+}
+.pnotice {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+.pnotice .ico {
+  margin-top: 1px;
+  color: var(--accent-hi);
+}
+.pnotice.ok .ico {
+  color: var(--ok);
+}
+.pnotice.warn {
+  color: #ffe2b0;
+}
+.pnotice.warn .ico {
+  color: var(--warn);
+}

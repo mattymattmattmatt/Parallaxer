@@ -14,7 +14,7 @@ AI depth estimation, occlusion-aware stereo view synthesis and hardware video en
 | **Stereography** | Depth budget (% of width), screen plane / convergence (manual, histogram drag, or auto-converge on subject), symmetric or single-eye synthesis, depth curve and clip planes, automatic **floating window** against window violations, and a **comfort analyser** that checks divergence for your target screen size. |
 | **Outputs** | Full / half side-by-side, full / half top-bottom, anaglyph (Dubois red-cyan, green-magenta, amber-blue and more), row / column / checkerboard interleave, RGB-D, depth map. |
 | **Preview** | Real-time viewer with Output, Anaglyph, Wiggle, Look-around (pointer-driven novel views), Depth, Parallax heat-map, Occlusion and Original views. Hold `\` to compare. |
-| **Export** | WebCodecs hardware encoding to MP4 / MOV / WebM / MKV with H.264, HEVC, AV1 or VP9 · original audio copied bit-exact when possible · In/Out trimming · resolution and frame-rate conversion · stream straight to disk for unlimited length · pause / resume, and **Stop & save** to keep everything rendered so far as a playable file (audio trimmed to match) · batch export of the whole media bin. Filenames follow player conventions (`clip.3D.HSBS.mp4`). |
+| **Export** | WebCodecs hardware encoding to MP4 / MOV / WebM / MKV with H.264, HEVC, AV1 or VP9 · original audio copied bit-exact when possible · In/Out trimming · resolution and frame-rate conversion · stream straight to disk for unlimited length · pause / resume, and **Stop & save** to keep everything rendered so far as a playable file (audio trimmed to match) · batch export of the whole media bin · **parallel processing** (below). Filenames follow player conventions (`clip.3D.HSBS.mp4`). |
 | **Photos** | PNG / JPEG / WebP / JPS stills, plus **3D motion** videos (orbit, sway, dolly-zoom, swing, wigglegram) from a single photo. |
 | **Live** | Convert your camera or any screen / window / tab to 3D in real time, and record the result. |
 | **VR** | *View in VR* (WebXR) puts the live stereo pair on a virtual cinema screen in your headset — each eye sees its own synthesised view, no export needed. |
@@ -27,6 +27,24 @@ AI depth estimation, occlusion-aware stereo view synthesis and hardware video en
 2. Pick a **look** preset, then fine-tune in the inspector — every change previews instantly.
 3. Scrub the timeline, set **In / Out** with `I` / `O`, check comfort in the **Parallax** view.
 4. **Export** (`Ctrl+E`).
+
+### Export speed
+
+Exports keep several frames in flight: while one frame is being stabilised, rendered and encoded, the next ones
+are already being decoded and run through the depth model in **background workers** (each with its own model
+session). Frames are always finished strictly in order, so the file is the same as a one-frame-at-a-time export.
+
+*Processing speed* in the export dialog:
+
+- **Auto** (default) starts one worker, measures, and adds another only while it makes the export at least 10 %
+  faster. It never goes above a safe ceiling for the machine (CPU threads, device memory, model size) and gives
+  back any worker that doesn't help.
+- **Standard** runs depth in the page. It is the lowest-memory option.
+- **2× / 3× / 4×** start that many workers right away. Counts above the machine's safe limit are disabled.
+
+The progress view shows each worker's state and speed, plus a plain-language status line. If a worker can't
+start or crashes, its frames move to another worker. If none are left, the export carries on in the page and
+still completes.
 
 ### Keyboard
 
@@ -62,7 +80,7 @@ Pushing to `main` builds and publishes `dist/` to the `gh-pages` branch (see `.g
 ```
 src/
   gl/        WebGL2 stereo renderer and GLSL passes (upsample, snap, dilate, blur, warp, soften, compose)
-  depth/     ONNX Runtime engine, model registry & cache, temporal stabiliser
+  depth/     ONNX Runtime engine, model registry & cache, temporal stabiliser, background worker pool
   core/      settings / presets / layouts and the frame processor glue
   media/     probing (mediabunny) and export jobs (video, stills, 3D motion)
   app/       preview controller, inspector, export dialog

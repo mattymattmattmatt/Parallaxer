@@ -124,3 +124,19 @@ test('non-finite network output never reaches the renderer', () => {
   assert.ok(depth.every((v) => Number.isFinite(v) && v >= 0 && v <= 1));
   assert.ok(hist.every(Number.isFinite));
 });
+
+test('histogram and statistics describe the output depth', () => {
+  const st = new DepthStabilizer();
+  // Left half far (0.1), right half near (0.9) after normalisation.
+  const raw = new Float32Array(N).map((_, i) => ((i % W) < W / 2 ? 1 : 9));
+  const rgba = new Uint8Array(N * 4).fill(120);
+  const r = st.process(raw, W, H, rgba, W, H, { temporal: 0 });
+  const peak = (lo, hi) => Math.max(...r.hist.slice(lo, hi));
+  assert.equal(r.hist.length, 64);
+  assert.equal(Math.max(...r.hist), 1, 'normalised to the tallest bin');
+  assert.ok(peak(0, 8) === 1 && peak(56, 64) === 1, 'mass sits at both ends');
+  assert.ok(r.hist.slice(8, 56).every((v) => v === 0), 'nothing in between');
+  assert.ok(r.borderL < 0.05 && r.borderR > 0.95, 'border nearness per side');
+  // The subject estimate is centre-weighted and deliberately biased toward nearer content (weight 0.35 + v).
+  assert.ok(Math.abs(r.subject - 1.35 / 1.7) < 0.02, `near-biased subject estimate (${r.subject})`);
+});
