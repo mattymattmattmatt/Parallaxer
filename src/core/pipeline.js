@@ -42,11 +42,26 @@ export class FrameProcessor {
     const size = this.engine.inputSize(w, h, s.detail);
     const rgba = r.readModelInput(size.w, size.h);
     const res = await this.engine.infer(rgba, size.w, size.h);
-    const st = this.stabilizer.process(res.data, res.w, res.h, rgba, size.w, size.h, {
-      temporal: s.temporal,
-      cutSensitivity: s.cutSensitivity,
-      continuous
-    });
+    return this.finish({ ...res, rgba }, size, s, { continuous });
+  }
+
+  /**
+   * Second half of ingest(), for depth computed elsewhere (e.g. a worker pool): stabilise, upload and commit.
+   * The frame's colour must already be staged. `res` may carry prepared stabiliser inputs (luma, pLo, pHi).
+   */
+  finish(res, size, s, { continuous = false } = {}) {
+    const r = this.renderer;
+    const prepared = res.luma ? { luma: res.luma, pLo: res.pLo, pHi: res.pHi } : null;
+    const st = this.stabilizer.process(
+      res.data,
+      res.w,
+      res.h,
+      res.rgba ?? null,
+      size.w,
+      size.h,
+      { temporal: s.temporal, cutSensitivity: s.cutSensitivity, continuous },
+      prepared
+    );
     r.uploadDepth(st.depth, st.w, st.h);
     r.commit();
     this.autoConv.push(st.subject, st.cut || !continuous);

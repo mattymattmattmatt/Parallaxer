@@ -6,13 +6,26 @@ const MEAN = [0.485, 0.456, 0.406];
 const STD = [0.229, 0.224, 0.225];
 
 let ortPromise = null;
+let threadBudget = null;
+let assetBase = null;
+
+/** Cap WebAssembly threads for this context (parallel workers share the CPU). Call before the first load. */
+export function setThreadBudget(n) {
+  threadBudget = Math.max(1, Math.floor(n));
+}
+
+/** Base URL for relative model paths when there is no document (e.g. inside a worker). */
+export function setAssetBase(base) {
+  assetBase = base;
+}
 
 async function loadOrt() {
   ortPromise ??= import('onnxruntime-web/webgpu').then((ort) => {
     ort.env.wasm.wasmPaths = { wasm: new URL(ortWasmUrl, import.meta.url).href };
     ort.env.logLevel = 'error';
     if (self.crossOriginIsolated) {
-      ort.env.wasm.numThreads = Math.min(8, Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
+      const auto = Math.min(8, Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
+      ort.env.wasm.numThreads = threadBudget ? Math.min(auto, threadBudget) : auto;
     } else {
       ort.env.wasm.numThreads = 1;
     }
@@ -39,7 +52,7 @@ export async function detectWebGPU() {
 }
 
 function resolveUrl(url) {
-  return new URL(url, document.baseURI).href;
+  return new URL(url, assetBase ?? globalThis.document?.baseURI ?? self.location.href).href;
 }
 
 /** Fetch with streaming progress, backed by the Cache Storage API so large models download once. */

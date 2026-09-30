@@ -17,6 +17,7 @@ import {
   renderStill,
   exportMotion
 } from '../media/export.js';
+import { DepthWorkerPool, AutoTuner, poolSupported, workerCeiling, workerFootprintMB, MAX_WORKERS } from '../depth/pool.js';
 
 const OPTS_KEY = 'parallaxer.export.v1';
 const DEFAULT_OPTS = {
@@ -30,6 +31,7 @@ const DEFAULT_OPTS = {
   range: 'full',
   audio: 'copy',
   toDisk: false,
+  workers: 'auto',
   still: 'png',
   stillScale: 1,
   motionPath: 'orbit',
@@ -105,6 +107,16 @@ function download(blob, name) {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
   return url;
+}
+
+/** How depth was processed, for the summary: '2 background workers (auto-tuned, tried 3)'. */
+function processingLine(pool, tuner, peak) {
+  if (!pool || !peak) return 'Standard (in page)';
+  const plural = (k) => `${k} background worker${k > 1 ? 's' : ''}`;
+  if (!pool.ready.length) return `${plural(peak)}, then in the page after they stopped`;
+  const n = tuner?.best?.workers ?? pool.ready.length;
+  if (!tuner) return plural(n);
+  return `${plural(n)} (auto-tuned${peak > n ? `, tried ${peak}` : ''})`;
 }
 
 function eyeSizeFor(w, h, res) {
@@ -237,6 +249,7 @@ export class Exporter {
           field('Audio', seg([{ value: 'copy', label: 'Keep original', hint: 'Copied bit-exact when the container allows it' }, { value: 'none', label: 'Remove' }], o.audio, (v) => this.setOpt({ audio: v })))
         )
       );
+      form.append(this.speedField());
       if (supportsDiskStreaming()) {
         const cb = h('input', { type: 'checkbox', role: 'switch' });
         cb.checked = o.toDisk;
@@ -295,6 +308,7 @@ export class Exporter {
         ['Frames', batch ? '—' : `~${Math.round(span * (o.fps || it.meta?.fps || 30))}`],
         ['Audio', o.audio === 'none' ? 'Removed' : it.meta?.audio ? 'Original (copied when possible)' : 'None in source'],
         ['Est. size', batch ? '—' : '…', 'size'],
+        ['Processing', this.speedSummary()],
         ['File', batch ? 'One per clip' : outputName(it.name, s.layout, CONTAINERS[o.container].ext)]
       );
       const nImages = this.items.filter((i) => i.kind === 'image').length;
@@ -393,6 +407,64 @@ export class Exporter {
     );
   }
 
+  /** Machine limits for parallel depth workers with the current model. */
+  speedLimits() {
+    const model = this.app.currentModel();
+    const { cap, why } = workerCeiling({ model, gpu: this.app.gpu() });
+    return { cap, why, mb: workerFootprintMB(model, this.store.state.detail), model };
+  }
+
+  /**
+   * Whether Auto should use background workers. They pay off when depth runs on the GPU, or on a single-threaded
+   * CPU runtime; a cross-origin-isolated CPU runtime already spreads one frame over every core.
+   */
+  autoUsesWorkers() {
+    const backend = this.app.engine.backend ?? (this.app.gpu() ? 'webgpu' : 'wasm');
+    return backend === 'webgpu' || !globalThis.crossOriginIsolated;
+  }
+
+  speedSummary() {
+    const w = this.opts.workers;
+    if (w === 'off' || !poolSupported()) return 'Standard (in page)';
+    const { cap } = this.speedLimits();
+    if (w === 'auto') return this.autoUsesWorkers() ? `Auto · up to ${cap} worker${cap > 1 ? 's' : ''}` : 'Auto · in page (all CPU cores)';
+    return `${Math.min(Number(w), cap)} workers`;
+  }
+
+  speedField() {
+    const o = this.opts;
+    if (!poolSupported()) {
+      return field('Processing speed', h('div', { class: 'ctl-hint' }, 'Standard mode — this browser has no background workers.'));
+    }
+    const { cap, why, mb } = this.speedLimits();
+    const gpu = !!this.app.gpu();
+    const choices = [
+      { value: 'auto', label: 'Auto', hint: 'Recommended' },
+      { value: 'off', label: 'Standard', hint: 'Depth runs in the page; lowest memory use' },
+      ...[2, 3, 4].slice(0, MAX_WORKERS - 1).map((n) => ({
+        value: String(n),
+        label: `${n}×`,
+        disabled: n > cap,
+        hint: n > cap ? `Above the safe limit for this machine (${why})` : `${n} background workers`
+      }))
+    ];
+    const current = o.workers !== 'auto' && o.workers !== 'off' && Number(o.workers) > cap ? 'auto' : String(o.workers);
+    const unit = gpu ? 'GPU memory' : 'memory';
+    const hint =
+      current === 'auto'
+        ? this.autoUsesWorkers()
+          ? `Starts with one background worker and adds more only while each one makes the export faster — at most ${cap} here (limited by ${why}). About ${mb} MB of ${unit} per worker; extras are released as soon as they stop helping.`
+          : 'Depth runs on the CPU here and already uses every core for each frame, so Auto keeps it in the page — extra workers would only compete for the same cores.'
+        : current === 'off'
+          ? 'Depth runs in the page, overlapped with rendering and encoding. Lowest memory use.'
+          : `${current} workers from the start, about ${Number(current) * mb} MB of ${unit} in total. If one fails, its frames move to the others.`;
+    return field(
+      'Processing speed',
+      seg(choices, current, (v) => this.setOpt({ workers: v })),
+      hint
+    );
+  }
+
   stillName() {
     const o = this.opts;
     const ext = o.still === 'jpeg' ? 'jpg' : o.still;
@@ -422,6 +494,8 @@ export class Exporter {
     const sSpeed = stat('Speed');
     const sEta = stat('Remaining');
     const subtitle = h('div', { class: 'ctl-hint' }, '');
+    const workersEl = h('div', { class: 'workers', hidden: true });
+    const noticeEl = h('div', { class: 'pnotice', hidden: true });
     const pauseBtn = h('button', { class: 'btn' }, 'Pause');
     const stopBtn = h('button', { class: 'btn', title: 'End the export here and save everything rendered so far as a playable file' }, icon('save'), 'Stop & save');
     const cancelBtn = h('button', { class: 'btn danger' }, 'Cancel');
@@ -431,7 +505,7 @@ export class Exporter {
     const foot = h('div', { class: 'modal-foot' }, note, actions);
     this.dlg.replaceChildren(
       h('div', { class: 'modal-head' }, h('h2', {}, title), h('span')),
-      h('div', { class: 'modal-body' }, h('div', { class: 'progress-view' }, subtitle, canvas, h('div', { class: 'bar' }, bar), h('div', { class: 'stats' }, sProg.el, sFrames.el, sSpeed.el, sEta.el))),
+      h('div', { class: 'modal-body' }, h('div', { class: 'progress-view' }, subtitle, canvas, h('div', { class: 'bar' }, bar), h('div', { class: 'stats' }, sProg.el, sFrames.el, sSpeed.el, sEta.el), workersEl, noticeEl)),
       foot
     );
     const ctx = canvas.getContext('2d');
@@ -442,6 +516,31 @@ export class Exporter {
       pauseBtn,
       stopBtn,
       cancelBtn,
+      /** Live state of the background depth workers. */
+      workers(list) {
+        const shown = list.filter((w) => w.state !== 'retired' || w.frames);
+        workersEl.hidden = !shown.length;
+        const label = { starting: 'starting…', ready: '', retiring: 'releasing', retired: 'released', failed: 'stopped' };
+        workersEl.replaceChildren(
+          h('span', { class: 'workers-title' }, 'Depth workers'),
+          ...shown.map((w) =>
+            h(
+              'span',
+              { class: `wchip ${w.state}`, title: w.error ? `Stopped: ${w.error}` : `${w.frames} frames${w.backend ? ` on ${w.backend === 'webgpu' ? 'the GPU' : 'the CPU'}` : ''}` },
+              h('i', { class: 'wdot' }),
+              h('b', {}, w.label),
+              w.state === 'ready' && w.ms ? `${w.ms.toFixed(0)} ms/frame` : label[w.state] ?? w.state,
+              w.frames ? h('span', { class: 'wframes' }, `· ${w.frames.toLocaleString()} done`) : null
+            )
+          )
+        );
+      },
+      /** One-line, plain-language status (tone: info | ok | warn). */
+      notice(text, tone = 'info') {
+        noticeEl.hidden = !text;
+        noticeEl.className = `pnotice ${tone}`;
+        noticeEl.replaceChildren(icon(tone === 'warn' ? 'alert' : tone === 'ok' ? 'check' : 'info'), h('span', {}, text));
+      },
       /** Swap the footer for a question with choice buttons; any choice restores the normal footer. */
       confirm(message, choices) {
         const restore = () => foot.replaceChildren(note, actions);
@@ -556,8 +655,22 @@ export class Exporter {
     let cancelled = false;
     let stopEarly = false;
     const t0 = performance.now();
+    let pool = null;
+    let tuner = null;
+    let peakWorkers = 0;
+    // Until the first job exists, Cancel just stops the start-up (model load / worker start).
+    ui.pauseBtn.disabled = true;
+    ui.cancelBtn.onclick = () => {
+      cancelled = true;
+      this.startingPool?.dispose();
+    };
     try {
       await this.app.ensureEngine();
+      if (cancelled) throw new ExportCancelled();
+      ({ pool, tuner } = await this.startPool(ui));
+      if (cancelled) throw new ExportCancelled();
+      ui.pauseBtn.disabled = false;
+      const trackPeak = () => (peakWorkers = Math.max(peakWorkers, pool?.ready.length ?? 0));
       for (let i = 0; i < batch.length; i++) {
         const it = batch[i];
         const meta = it.meta;
@@ -596,11 +709,18 @@ export class Exporter {
           audio: o.audio,
           trim,
           fileHandle: handle,
-          onFrame: ({ canvas }) => ui.paint(canvas),
+          pool,
+          tuner,
+          onNotice: (text, tone) => ui.notice(text, tone),
+          onFrame: ({ canvas }) => {
+            ui.paint(canvas);
+            trackPeak();
+          },
           onProgress: (p) => ui.set({ ...p, totalFrames, realtime: p.elapsed > 0 ? p.time / p.elapsed : 0 }),
           onState: (st) => ui.setState(st)
         });
         this.job = job;
+        tuner?.interrupted();
         ui.stopBtn.hidden = false;
         ui.pauseBtn.onclick = () => (job.paused ? job.resume() : job.pause());
         ui.stopBtn.onclick = () => {
@@ -685,7 +805,8 @@ export class Exporter {
           ['Total size', formatBytes(bytes)],
           ['Frames', String(frames)],
           ['Time', formatDuration(elapsed)],
-          ['Throughput', `${(frames / Math.max(0.001, elapsed)).toFixed(1)} fps`]
+          ['Throughput', `${(frames / Math.max(0.001, elapsed)).toFixed(1)} fps`],
+          ['Processing', processingLine(pool, tuner, peakWorkers)]
         ],
         files: results.filter((r) => r.blob).map((r) => ({ blob: r.blob, name: r.name })),
         warnings
@@ -693,6 +814,8 @@ export class Exporter {
       this.app.toast({ kind: 'ok', title: stopEarly ? 'Partial export saved' : 'Export complete', msg: `${results.length} file${results.length > 1 ? 's' : ''} · ${formatBytes(bytes)}` });
     } catch (err) {
       this.running = false;
+      // Cancelled before any render started: don't leave an empty file behind in the chosen folder.
+      if (fileHandle && !this.job) fileHandle.remove?.().catch(() => {});
       if (cancelled || err instanceof ExportCancelled) {
         this.renderConfig();
         this.app.toast({ kind: 'warn', title: 'Export cancelled' });
@@ -703,7 +826,62 @@ export class Exporter {
     } finally {
       this.running = false;
       this.job = null;
+      this.startingPool = null;
+      pool?.dispose();
     }
+  }
+
+  /**
+   * Bring up the background depth workers for an export, per the Processing speed option. Never throws: if
+   * workers can't start, the export simply runs in standard mode and the user is told why.
+   */
+  async startPool(ui) {
+    const o = this.opts;
+    if (o.workers === 'off' || !poolSupported()) return { pool: null, tuner: null };
+    const auto = o.workers === 'auto';
+    if (auto && !this.autoUsesWorkers()) {
+      ui.notice('Depth runs on all CPU cores in the page — background workers wouldn’t add speed here.');
+      return { pool: null, tuner: null };
+    }
+    const { cap, model } = this.speedLimits();
+    const target = auto ? 1 : Math.max(1, Math.min(Number(o.workers) || 1, cap));
+    const cores = navigator.hardwareConcurrency || 4;
+    const pool = new DepthWorkerPool({
+      model: model.bytes ? model : model.id,
+      backend: this.store.state.backend,
+      expectBackend: this.app.engine.backend,
+      threads: Math.max(1, Math.floor((cores - 1) / (auto ? cap : target))),
+      onChange: (list) => ui.workers(list)
+    });
+    this.startingPool = pool;
+    ui.notice('Starting a background depth worker (loads the model once, a few seconds)…');
+    const first = await pool.addWorker();
+    if (pool.disposed) return { pool: null, tuner: null }; // cancelled while starting
+    if (!first) {
+      const reason = pool.workers[0]?.error ?? 'unknown error';
+      pool.dispose();
+      ui.workers([]);
+      ui.notice(`Background workers aren't available here (${reason}). Using standard mode instead.`, 'warn');
+      return { pool: null, tuner: null };
+    }
+    if (auto) {
+      ui.notice(cap > 1 ? 'Auto: measuring speed with 1 worker before trying more…' : 'Running with 1 background worker (the safe limit for this machine).', 'info');
+      return { pool, tuner: cap > 1 ? new AutoTuner(pool, { cap, onMessage: (t, tone) => ui.notice(t, tone) }) : null };
+    }
+    // Fixed count: bring the rest up one at a time in the background; work starts right away.
+    (async () => {
+      for (let i = 2; i <= target; i++) {
+        ui.notice(`Starting worker ${i} of ${target}…`);
+        const w = await pool.addWorker();
+        if (pool.disposed) return;
+        if (!w) {
+          ui.notice(`Worker ${i} couldn't start — continuing with ${pool.ready.length}.`, 'warn');
+          return;
+        }
+      }
+      ui.notice(`Running with ${pool.ready.length} background workers.`, 'ok');
+    })();
+    return { pool, tuner: null };
   }
 
   async startStill() {

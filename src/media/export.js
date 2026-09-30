@@ -13,11 +13,15 @@ import {
   CanvasSource,
   Quality,
   VideoSample,
+  VideoSampleSink,
+  VideoSampleSource,
   canEncodeVideo
 } from 'mediabunny';
 import { StereoRenderer, LAYOUT } from '../gl/renderer.js';
 import { FrameProcessor } from '../core/pipeline.js';
 import { LAYOUTS, layoutGeometry } from '../core/settings.js';
+import { prepareFrame } from '../depth/stabilizer.js';
+import { PoolExhausted } from '../depth/pool.js';
 
 export const CONTAINERS = {
   mp4: { label: 'MP4', ext: 'mp4', mime: 'video/mp4', codecs: ['avc', 'hevc', 'av1', 'vp9'] },
@@ -136,9 +140,26 @@ export class ExportCancelled extends Error {
   }
 }
 
+/** Frame-centre sample times for constant-rate output (k-th output frame shows the source at (k + ½)/fps). */
+function* frameTimes(start, end, fps) {
+  const n = Math.max(1, Math.round((end - start) * fps));
+  for (let k = 0; k < n; k++) yield start + (k + 0.5) / fps;
+}
+
+// Decoded frames waiting for depth are kept as GPU bitmaps; cap their total size.
+const IN_FLIGHT_BUDGET_BYTES = 512 * 2 ** 20;
+const MAX_IN_FLIGHT = 12;
+
 /**
- * Converts a video file to a stereoscopic video. Hardware-decoded, depth-processed on the GPU,
- * hardware-encoded, with the original audio copied bit-exact when the container allows it.
+ * Converts a video file to a stereoscopic video.
+ *
+ * Pipeline: hardware decode → GPU downscale + async readback → depth inference (a pool of background workers,
+ * or the page's own engine) → in-order stabilise + render + hardware encode. Several frames are in flight at
+ * once so the CPU and GPU work side by side, but frames are always finished strictly in order, so the result
+ * is the same as a one-frame-at-a-time export. Original audio is copied in lockstep behind the video.
+ *
+ * Options: { file, engine, settings, eyeW, eyeH, container, codec, quality, frameRate, sourceFps, audio, trim,
+ *            fileHandle, pool?, tuner?, onFrame, onProgress, onState, onNotice }
  */
 export class VideoExportJob {
   constructor(opts) {
@@ -151,53 +172,82 @@ export class VideoExportJob {
     this.lastTs = null;
     this.renderedEnd = 0;
     this.warnings = [];
+    this.poolDown = false;
+  }
+
+  pause() {
+    if (this.state !== 'running') return;
+    this.paused = true;
+  }
+
+  resume() {
+    if (!this.paused) return;
+    this.paused = false;
+    this.o.tuner?.interrupted();
+    this.#wake();
   }
 
   /** End the export at the last rendered frame and finalise a playable file with everything done so far. */
   stopAndSave() {
     if (this.state !== 'running' && this.state !== 'paused') return;
     this.stopRequested = true;
-    this.pauseCtl?.abort();
-    const r = this.resumeResolve;
-    this.resumeResolve = null;
-    r?.();
-  }
-
-  pause() {
-    if (this.state !== 'running') return;
-    this.paused = true;
-    this.pauseCtl?.abort();
-  }
-
-  resume() {
-    if (!this.paused) return;
-    this.paused = false;
-    const r = this.resumeResolve;
-    this.resumeResolve = null;
-    r?.();
+    this.#wake();
   }
 
   async cancel() {
     this.cancelled = true;
-    this.pauseCtl?.abort();
-    this.resumeResolve?.();
-    for (const c of [this.conversion, this.audioConversion]) {
-      try {
-        await c?.cancel();
-      } catch {
-        /* ignore */
-      }
+    this.#wake();
+    try {
+      await this.audioConversion?.cancel();
+    } catch {
+      /* ignore */
     }
   }
 
-  #tidy(input, renderer) {
-    input.dispose();
-    renderer.dispose();
+  #wake() {
+    const r = this.resumeResolve;
+    this.resumeResolve = null;
+    r?.();
+  }
+
+  /** Pause / stop / cancel checkpoint between frames. Returns false when the export should stop dispatching. */
+  async #gate() {
+    if (this.cancelled) throw new ExportCancelled();
+    if (this.stopRequested) return false;
+    if (this.paused) {
+      this.state = 'paused';
+      this.o.onState?.('paused');
+      const t0 = performance.now();
+      await new Promise((r) => (this.resumeResolve = r));
+      this.pausedMs += performance.now() - t0;
+      if (this.cancelled) throw new ExportCancelled();
+      if (this.stopRequested) return false;
+      this.state = 'running';
+      this.o.onState?.('running');
+    }
+    return true;
+  }
+
+  /** Depth for one frame: the worker pool when available, otherwise (or after it gives up) the page engine. */
+  async #depth(rgba, size) {
+    const o = this.o;
+    if (o.pool && !this.poolDown) {
+      try {
+        return await o.pool.infer(rgba, size.w, size.h);
+      } catch (err) {
+        if (!(err instanceof PoolExhausted)) throw err;
+        this.poolDown = true;
+        o.onNotice?.(`${err.message} Continuing in the page — slower, but the export carries on.`, 'warn');
+      }
+    }
+    const res = await o.engine.infer(rgba, size.w, size.h);
+    return { ...res, ...prepareFrame(res.data, res.w, res.h, rgba, size.w, size.h) };
   }
 
   async run() {
     const o = this.o;
-    const geo = layoutGeometry(o.settings.layout, o.eyeW, o.eyeH);
+    const s = o.settings;
+    const geo = layoutGeometry(s.layout, o.eyeW, o.eyeH);
     const canvas = new OffscreenCanvas(geo.canvasW, geo.canvasH);
     const renderer = new StereoRenderer(canvas, { preserveDrawingBuffer: true });
     const fp = new FrameProcessor(renderer, o.engine);
@@ -212,86 +262,18 @@ export class VideoExportJob {
       target = new BufferTarget();
     }
     const output = new Output({ format: makeFormat(o.container, streaming), target });
-    const s = o.settings;
-    let lastTs = -Infinity;
+    const queue = [];
     const startWall = performance.now();
-    let procTime = 0;
-
-    const frameCanvas = new OffscreenCanvas(2, 2);
-    const frameCtx = frameCanvas.getContext('2d', { alpha: false });
+    this.pausedMs = 0;
     const layoutLabel = LAYOUTS[s.layout]?.label ?? s.layout;
-    const conversion = await Conversion.init({
-      input,
-      output,
-      tracks: 'primary',
-      trim: o.trim ?? undefined,
-      showWarnings: false,
-      video: {
-        codec: o.codec,
-        quality: makeQuality(o.quality, geo.canvasW, geo.canvasH, o.frameRate || o.sourceFps, o.codec),
-        keyFrameInterval: o.keyFrameInterval ?? 2,
-        frameRate: o.frameRate || undefined,
-        allowTransformationMetadata: false,
-        forceTranscode: true,
-        hardwareAcceleration: o.hardwareAcceleration ?? 'no-preference',
-        processedWidth: geo.canvasW,
-        processedHeight: geo.canvasH,
-        process: async (sample) => {
-          await yieldToUI();
-          if (this.cancelled) throw new ExportCancelled();
-          const t0 = performance.now();
-          // drawWithFit applies rotation, flip and pixel aspect ratio and crops coded padding in one GPU draw.
-          const fw = sample.displayWidth;
-          const fh = sample.displayHeight;
-          if (frameCanvas.width !== fw || frameCanvas.height !== fh) {
-            frameCanvas.width = fw;
-            frameCanvas.height = fh;
-          }
-          sample.drawWithFit(frameCtx, { fit: 'fill' });
-          const continuous = sample.timestamp > lastTs && sample.timestamp - lastTs < 1;
-          lastTs = sample.timestamp;
-          const stats = await fp.ingest(frameCanvas, fw, fh, s, { continuous });
-          fp.renderOutput(s, geo);
-          const out = new VideoFrame(canvas, {
-            timestamp: Math.round(sample.timestamp * 1e6),
-            duration: Math.max(1, Math.round(sample.duration * 1e6))
-          });
-          this.frames++;
-          this.lastTs = sample.timestamp;
-          this.renderedEnd = sample.timestamp + sample.duration;
-          advanceAudio(sample.timestamp);
-          procTime += performance.now() - t0;
-          o.onFrame?.({ canvas, frames: this.frames, stats, timestamp: sample.timestamp });
-          return new VideoSample(out);
-        }
-      },
-      // Audio runs in its own conversion (below) so it can be held back to the last rendered video frame.
-      audio: { discard: true },
-      // Composable: this job owns the output's lifecycle, which is what lets "Stop & save" finalise early.
-      composable: true
-    });
-    this.conversion = conversion;
 
-    // Audio is copied (or transcoded when the container needs it) by a second conversion into the same output,
-    // advanced in lockstep behind the video so a partial export never carries audio past its last frame.
+    const tidy = () => {
+      for (const item of queue.splice(0)) item.bitmap.close();
+      input.dispose();
+      renderer.dispose();
+    };
+
     let audioConv = null;
-    if (o.audio !== 'none') {
-      audioConv = await Conversion.init({
-        input,
-        output,
-        tracks: 'primary',
-        trim: o.trim ?? undefined,
-        showWarnings: false,
-        video: { discard: true },
-        audio: {},
-        composable: true
-      });
-      for (const d of audioConv.discardedTracks) {
-        if (d.reason !== 'discarded_by_user') this.warnings.push(`Audio track dropped (${d.reason.replaceAll('_', ' ')}).`);
-      }
-      if (!audioConv.utilizedTracks.length) audioConv = null;
-    }
-    this.audioConversion = audioConv;
     let audioRun = null;
     let audioUntil = -Infinity;
     let audioError = null;
@@ -317,62 +299,165 @@ export class VideoExportJob {
       if (audioError && !this.cancelled) throw audioError;
     };
 
-    for (const d of conversion.discardedTracks) {
-      if (d.reason === 'discarded_by_user') continue;
-      this.warnings.push(`${d.track.type === 'audio' ? 'Audio' : 'Video'} track dropped (${d.reason.replaceAll('_', ' ')}).`);
-    }
-    // Composable conversions are always "valid"; require a usable video track ourselves.
-    if (!conversion.utilizedTracks.some((t) => t.isVideoTrack())) {
-      this.#tidy(input, renderer);
-      await writable?.abort?.().catch(() => {});
-      const why = conversion.discardedTracks.map((d) => `${d.track.type}: ${d.reason.replaceAll('_', ' ')}`).join('; ');
-      throw new Error(`This file can't be converted in this browser (${why || 'no usable tracks'}).`);
-    }
-
-    // Composable conversions leave metadata to the output's owner: carry the source tags over.
-    const inputTags = await input.getMetadataTags().catch(() => ({}));
-    const tags = { ...inputTags, comment: `Stereoscopic 3D (${layoutLabel}) converted with Parallaxer` };
-    delete tags.raw;
-    output.setMetadataTags(tags);
-    await output.start();
-
-    conversion.onProgress = (progress, time) => {
-      const elapsed = (performance.now() - startWall) / 1000;
-      o.onProgress?.({
-        progress,
-        time,
-        frames: this.frames,
-        elapsed,
-        fps: this.frames / Math.max(0.001, procTime / 1000),
-        eta: progress > 0.01 ? (elapsed / progress) * (1 - progress) : null
-      });
-    };
-
-    this.state = 'running';
-    let partial = false;
     try {
-      for (;;) {
-        this.pauseCtl = new AbortController();
-        await conversion.execute({ pauseSignal: this.pauseCtl.signal });
-        if (conversion.state === 'done') break;
+      const videoTrack = await input.getPrimaryVideoTrack();
+      if (!videoTrack) throw new Error('This file has no video track.');
+      if (!(await videoTrack.canDecode())) throw new Error("This browser can't decode the video in this file.");
+      const audioTrack = o.audio === 'none' ? null : await input.getPrimaryAudioTrack();
+      const tracks = [videoTrack, audioTrack].filter(Boolean);
+      const first = Math.max(0, await input.getFirstTimestamp(tracks).catch(() => 0));
+      const start = o.trim?.start ?? first;
+      const end = o.trim?.end ?? (await input.computeDuration(tracks));
+      const span = Math.max(1e-3, end - start);
+
+      const fpsOut = o.frameRate || null;
+      const videoSource = new VideoSampleSource({
+        codec: o.codec,
+        quality: makeQuality(o.quality, geo.canvasW, geo.canvasH, fpsOut || o.sourceFps, o.codec),
+        keyFrameInterval: o.keyFrameInterval ?? 2,
+        hardwareAcceleration: o.hardwareAcceleration ?? 'no-preference'
+      });
+      output.addVideoTrack(videoSource, fpsOut || o.sourceFps ? { frameRate: fpsOut || o.sourceFps } : {});
+
+      // Audio is copied (or transcoded when the container needs it) by a composable conversion into the same
+      // output, advanced in lockstep behind the video so a partial export never carries audio past its last frame.
+      if (audioTrack) {
+        audioConv = await Conversion.init({
+          input,
+          output,
+          tracks: 'primary',
+          trim: { start, end },
+          showWarnings: false,
+          video: { discard: true },
+          audio: {},
+          composable: true
+        });
+        for (const d of audioConv.discardedTracks) {
+          if (d.reason !== 'discarded_by_user') this.warnings.push(`Audio track dropped (${d.reason.replaceAll('_', ' ')}).`);
+        }
+        if (!audioConv.utilizedTracks.length) audioConv = null;
+      }
+      this.audioConversion = audioConv;
+
+      const inputTags = await input.getMetadataTags().catch(() => ({}));
+      const tags = { ...inputTags, comment: `Stereoscopic 3D (${layoutLabel}) converted with Parallaxer` };
+      delete tags.raw;
+      output.setMetadataTags(tags);
+      await output.start();
+
+      const sink = new VideoSampleSink(videoTrack);
+      const samples = fpsOut ? sink.samplesAtTimestamps(frameTimes(start, end, fpsOut)) : sink.samples(start, end);
+      const frameCanvas = new OffscreenCanvas(2, 2);
+      const frameCtx = frameCanvas.getContext('2d', { alpha: false });
+      let memCap = MAX_IN_FLIGHT;
+      const capacity = () => {
+        const workers = o.pool && !this.poolDown ? o.pool.ready.length : 0;
+        return Math.max(2, Math.min(workers ? workers * 2 + 2 : 3, memCap));
+      };
+
+      const emit = async (item) => {
+        let res;
+        try {
+          res = await item.depthP;
+        } finally {
+          if (this.cancelled) item.bitmap.close();
+        }
         if (this.cancelled) throw new ExportCancelled();
-        if (this.stopRequested) {
-          partial = true;
+        renderer.stage(item.bitmap, item.fw, item.fh);
+        const continuous = this.lastTs !== null && item.ts > this.lastTs && item.ts - this.lastTs < 1;
+        const stats = fp.finish(res, item.size, s, { continuous });
+        item.bitmap.close();
+        fp.renderOutput(s, geo);
+        const sample = new VideoSample(
+          new VideoFrame(canvas, { timestamp: Math.round(item.ts * 1e6), duration: Math.max(1, Math.round(item.dur * 1e6)) })
+        );
+        try {
+          await videoSource.add(sample);
+        } finally {
+          sample.close();
+        }
+        this.frames++;
+        this.lastTs = item.ts;
+        this.renderedEnd = item.ts + item.dur;
+        advanceAudio(item.ts);
+        o.onFrame?.({ canvas, frames: this.frames, stats, timestamp: item.ts });
+        o.tuner?.frame();
+        const elapsed = (performance.now() - startWall) / 1000;
+        const active = Math.max(0.001, elapsed - this.pausedMs / 1000);
+        const progress = Math.min(1, this.renderedEnd / span);
+        o.onProgress?.({
+          progress,
+          time: this.renderedEnd,
+          frames: this.frames,
+          elapsed,
+          fps: this.frames / active,
+          eta: progress > 0.01 ? (active / progress) * (1 - progress) : null
+        });
+      };
+
+      this.state = 'running';
+      let k = 0;
+      for await (const sample of samples) {
+        if (!sample) {
+          k++;
+          continue;
+        }
+        let ts;
+        let dur;
+        if (fpsOut) {
+          ts = k / fpsOut;
+          dur = 1 / fpsOut;
+          k++;
+        } else {
+          const a = Math.max(start, sample.timestamp);
+          const b = Math.min(end, sample.timestamp + sample.duration);
+          if (b <= a) {
+            sample.close();
+            continue;
+          }
+          ts = a - start;
+          dur = b - a;
+        }
+        let go;
+        try {
+          go = await this.#gate();
+        } catch (err) {
+          sample.close();
+          throw err;
+        }
+        if (!go) {
+          sample.close();
           break;
         }
-        if (this.paused) {
-          this.state = 'paused';
-          o.onState?.('paused');
-          await new Promise((r) => (this.resumeResolve = r));
-          if (this.cancelled) throw new ExportCancelled();
-          if (this.stopRequested) {
-            partial = true;
-            break;
-          }
-          this.state = 'running';
-          o.onState?.('running');
+        // drawWithFit applies rotation, flip and pixel aspect ratio and crops coded padding in one GPU draw.
+        const fw = sample.displayWidth;
+        const fh = sample.displayHeight;
+        if (frameCanvas.width !== fw || frameCanvas.height !== fh) {
+          frameCanvas.width = fw;
+          frameCanvas.height = fh;
         }
+        sample.drawWithFit(frameCtx, { fit: 'fill' });
+        sample.close();
+        const bitmap = frameCanvas.transferToImageBitmap();
+        const size = o.engine.inputSize(fw, fh, s.detail);
+        if (!this.frames && !queue.length) {
+          const perFrame = fw * fh * 4 + size.w * size.h * 16;
+          memCap = Math.max(2, Math.min(MAX_IN_FLIGHT, Math.floor(IN_FLIGHT_BUDGET_BYTES / perFrame)));
+        }
+        renderer.stage(bitmap, fw, fh);
+        const depthP = renderer.readModelInputAsync(size.w, size.h).then((rgba) => this.#depth(rgba, size));
+        depthP.catch(() => {}); // surfaced when the frame is emitted
+        queue.push({ bitmap, fw, fh, ts, dur, size, depthP });
+        while (queue.length >= capacity()) await emit(queue.shift());
+        await yieldToUI();
       }
+      // Finish every frame that is already in flight (also on Stop & save: that work is already paid for).
+      while (queue.length) {
+        if (this.cancelled) throw new ExportCancelled();
+        await emit(queue.shift());
+      }
+
+      const partial = this.stopRequested;
       if (partial) {
         if (!this.frames) throw new ExportCancelled();
         this.state = 'finishing';
@@ -384,34 +469,39 @@ export class VideoExportJob {
       }
       if (this.cancelled) throw new ExportCancelled();
       await output.finalize();
+
+      this.state = 'done';
+      tidy();
+      const elapsed = (performance.now() - startWall) / 1000;
+      const summary = { frames: this.frames, elapsed, warnings: this.warnings, partial, rendered: this.renderedEnd };
+      if (streaming) {
+        try {
+          await writable.close();
+        } catch {
+          /* already closed by the target */
+        }
+        const f = await o.fileHandle.getFile().catch(() => null);
+        return { ...summary, streamed: true, name: o.fileHandle.name, bytes: f?.size ?? 0 };
+      }
+      const mime = CONTAINERS[o.container]?.mime ?? 'video/mp4';
+      const blob = new Blob([output.target.buffer], { type: mime });
+      return { ...summary, blob, bytes: blob.size };
     } catch (err) {
       this.state = 'failed';
+      try {
+        await audioConv?.cancel();
+      } catch {
+        /* ignore */
+      }
       await output.cancel().catch(() => {});
-      this.#tidy(input, renderer);
+      tidy();
       if (writable) {
         await writable.abort?.().catch(() => {});
         await o.fileHandle.remove?.().catch(() => {});
       }
-      if (this.cancelled || err?.name === 'ConversionCanceledError') throw new ExportCancelled();
+      if (this.cancelled || err?.name === 'ConversionCanceledError' || err instanceof ExportCancelled) throw new ExportCancelled();
       throw err;
     }
-
-    this.state = 'done';
-    this.#tidy(input, renderer);
-    const elapsed = (performance.now() - startWall) / 1000;
-    const summary = { frames: this.frames, elapsed, warnings: this.warnings, partial, rendered: this.renderedEnd };
-    if (streaming) {
-      try {
-        await writable.close();
-      } catch {
-        /* already closed by the target */
-      }
-      const f = await o.fileHandle.getFile().catch(() => null);
-      return { ...summary, streamed: true, name: o.fileHandle.name, bytes: f?.size ?? 0 };
-    }
-    const mime = CONTAINERS[o.container]?.mime ?? 'video/mp4';
-    const blob = new Blob([output.target.buffer], { type: mime });
-    return { ...summary, blob, bytes: blob.size };
   }
 }
 
