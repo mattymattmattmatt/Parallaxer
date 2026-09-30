@@ -124,7 +124,7 @@ export function buildInspector(root, store, app) {
   const renderCustom = () => {
     const cm = app.customModel;
     const on = store.state.model === 'custom';
-    customBox.replaceChildren(
+    const children = [
       cm
         ? h(
             'button',
@@ -136,7 +136,8 @@ export function buildInspector(root, store, app) {
         : null,
       h('button', { type: 'button', class: 'btn subtle block', onclick: () => customInput.click(), title: 'Use any ONNX depth network (NCHW RGB input, single depth output)' }, icon('plus'), cm ? 'Replace custom ONNX model…' : 'Load custom ONNX model…'),
       customInput
-    );
+    ];
+    customBox.replaceChildren(...children.filter(Boolean));
   };
   app.onCustomModel = renderCustom;
   controls.push({ el: customBox, keys: ['model'], sync: renderCustom });
