@@ -91,6 +91,12 @@ function selectEl(options, value, onChange) {
   return h('div', { class: 'select-wrap' }, sel, icon('chevron'));
 }
 
+/** Human duration that stays meaningful for very short spans (partial exports can be under a second). */
+function formatSpan(sec) {
+  if (!Number.isFinite(sec)) return '—';
+  return sec < 60 ? `${sec.toFixed(1)} s` : formatDuration(sec);
+}
+
 function download(blob, name) {
   const url = URL.createObjectURL(blob);
   const a = h('a', { href: url, download: name });
@@ -417,11 +423,16 @@ export class Exporter {
     const sEta = stat('Remaining');
     const subtitle = h('div', { class: 'ctl-hint' }, '');
     const pauseBtn = h('button', { class: 'btn' }, 'Pause');
+    const stopBtn = h('button', { class: 'btn', title: 'End the export here and save everything rendered so far as a playable file' }, icon('save'), 'Stop & save');
     const cancelBtn = h('button', { class: 'btn danger' }, 'Cancel');
+    stopBtn.hidden = true;
+    const note = h('span', { class: 'note' }, 'Settings are locked in for this render. Keep this tab in the foreground for best speed.');
+    const actions = h('div', { class: 'actions' }, pauseBtn, stopBtn, cancelBtn);
+    const foot = h('div', { class: 'modal-foot' }, note, actions);
     this.dlg.replaceChildren(
       h('div', { class: 'modal-head' }, h('h2', {}, title), h('span')),
       h('div', { class: 'modal-body' }, h('div', { class: 'progress-view' }, subtitle, canvas, h('div', { class: 'bar' }, bar), h('div', { class: 'stats' }, sProg.el, sFrames.el, sSpeed.el, sEta.el))),
-      h('div', { class: 'modal-foot' }, h('span', { class: 'note' }, 'Settings are locked in for this render. Keep this tab in the foreground for best speed.'), h('div', { class: 'actions' }, pauseBtn, cancelBtn))
+      foot
     );
     const ctx = canvas.getContext('2d');
     let lastPaint = 0;
@@ -429,7 +440,38 @@ export class Exporter {
       bar,
       subtitle,
       pauseBtn,
+      stopBtn,
       cancelBtn,
+      /** Swap the footer for a question with choice buttons; any choice restores the normal footer. */
+      confirm(message, choices) {
+        const restore = () => foot.replaceChildren(note, actions);
+        foot.replaceChildren(
+          h('span', { class: 'note confirm-msg' }, icon('alert'), message),
+          h(
+            'div',
+            { class: 'actions' },
+            choices.map((c) =>
+              h(
+                'button',
+                {
+                  class: `btn${c.primary ? ' primary' : ''}${c.danger ? ' danger' : ''}`,
+                  onclick: () => {
+                    restore();
+                    c.run();
+                  }
+                },
+                c.label
+              )
+            )
+          )
+        );
+      },
+      setState(st) {
+        pauseBtn.textContent = st === 'paused' ? 'Resume' : 'Pause';
+        const finishing = st === 'finishing';
+        for (const b of [pauseBtn, stopBtn, cancelBtn]) b.disabled = finishing;
+        if (finishing) foot.replaceChildren(h('span', { class: 'note' }, 'Finalising the file with the frames rendered so far…'), actions);
+      },
       paint(src, force = false) {
         const now = performance.now();
         if (!force && now - lastPaint < 200) return;
@@ -512,6 +554,7 @@ export class Exporter {
     const results = [];
     const warnings = [];
     let cancelled = false;
+    let stopEarly = false;
     const t0 = performance.now();
     try {
       await this.app.ensureEngine();
@@ -555,20 +598,53 @@ export class Exporter {
           fileHandle: handle,
           onFrame: ({ canvas }) => ui.paint(canvas),
           onProgress: (p) => ui.set({ ...p, totalFrames, realtime: p.elapsed > 0 ? p.time / p.elapsed : 0 }),
-          onState: (st) => (ui.pauseBtn.textContent = st === 'paused' ? 'Resume' : 'Pause')
+          onState: (st) => ui.setState(st)
         });
         this.job = job;
+        ui.stopBtn.hidden = false;
         ui.pauseBtn.onclick = () => (job.paused ? job.resume() : job.pause());
+        ui.stopBtn.onclick = () => {
+          stopEarly = true;
+          job.stopAndSave();
+        };
         ui.cancelBtn.onclick = () => {
-          cancelled = true;
-          job.cancel();
+          if (!job.frames) {
+            cancelled = true;
+            job.cancel();
+            return;
+          }
+          // Work is at stake: pause while asking, so "save" keeps exactly what was on screen.
+          const wasPaused = job.paused;
+          if (!wasPaused) job.pause();
+          ui.confirm(`Discard ${job.frames.toLocaleString()} rendered frame${job.frames > 1 ? 's' : ''} (${formatSpan(job.renderedEnd)} of video)?`, [
+            { label: 'Keep rendering', run: () => !wasPaused && job.resume() },
+            {
+              label: 'Save what’s done',
+              primary: true,
+              run: () => {
+                stopEarly = true;
+                job.stopAndSave();
+              }
+            },
+            {
+              label: 'Discard',
+              danger: true,
+              run: () => {
+                cancelled = true;
+                job.cancel();
+              }
+            }
+          ]);
         };
         const res = await job.run();
+        const outName = res.partial ? outputName(`${baseName(it.name)} (partial)`, s.layout, ext) : name;
         warnings.push(...res.warnings.map((w) => `${it.name}: ${w}`));
-        results.push({ ...res, name: res.name ?? name, source: it });
-        if (res.blob) download(res.blob, name);
+        results.push({ ...res, name: res.name ?? outName, source: it, span });
+        if (res.blob) download(res.blob, outName);
+        if (stopEarly) break;
       }
-      const photos = this.items.filter((i) => i.kind === 'image');
+      const photos = stopEarly ? [] : this.items.filter((i) => i.kind === 'image');
+      ui.stopBtn.hidden = true;
       for (let i = 0; i < photos.length; i++) {
         const it = photos[i];
         ui.subtitle.textContent = `[photo ${i + 1}/${photos.length}] ${it.name}`;
@@ -593,10 +669,19 @@ export class Exporter {
       const bytes = results.reduce((a, r) => a + r.bytes, 0);
       const frames = results.reduce((a, r) => a + r.frames, 0);
       const elapsed = (performance.now() - t0) / 1000;
+      const last = results[results.length - 1];
+      let headline;
+      if (last?.partial && results.length === 1) {
+        headline = `Saved the first ${formatSpan(last.rendered)} of ${formatSpan(last.span)} as ${last.name}${last.streamed ? ' on disk' : ''}.`;
+      } else if (stopEarly) {
+        headline = `Stopped early: ${results.length} file${results.length > 1 ? 's' : ''} saved${last?.partial ? `, the last one partial (${formatSpan(last.rendered)})` : ''}.`;
+      } else {
+        headline = results.length > 1 ? `${results.length} files exported.` : `Saved ${results[0]?.name ?? ''}${results[0]?.streamed ? ' to disk' : ''}.`;
+      }
       this.doneView({
-        title: 'Export complete',
+        title: stopEarly ? 'Partial export saved' : 'Export complete',
         lines: [
-          results.length > 1 ? `${results.length} files exported.` : `Saved ${results[0]?.name ?? ''}${results[0]?.streamed ? ' to disk' : ''}.`,
+          headline,
           ['Total size', formatBytes(bytes)],
           ['Frames', String(frames)],
           ['Time', formatDuration(elapsed)],
@@ -605,7 +690,7 @@ export class Exporter {
         files: results.filter((r) => r.blob).map((r) => ({ blob: r.blob, name: r.name })),
         warnings
       });
-      this.app.toast({ kind: 'ok', title: 'Export complete', msg: `${results.length} file${results.length > 1 ? 's' : ''} · ${formatBytes(bytes)}` });
+      this.app.toast({ kind: 'ok', title: stopEarly ? 'Partial export saved' : 'Export complete', msg: `${results.length} file${results.length > 1 ? 's' : ''} · ${formatBytes(bytes)}` });
     } catch (err) {
       this.running = false;
       if (cancelled || err instanceof ExportCancelled) {
