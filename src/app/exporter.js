@@ -131,7 +131,8 @@ export class Exporter {
 
   open(items) {
     this.items = items;
-    this.item = items[0];
+    // In a mixed batch the video settings drive the dialog; photos are saved as stills alongside.
+    this.item = items.find((i) => i.kind === 'video') ?? items[0];
     const kind = this.item.kind;
     if (kind === 'image' && !['still', 'motion'].includes(this.opts.tab)) this.opts.tab = 'still';
     if (kind === 'video' && !['video', 'frame'].includes(this.opts.tab)) this.opts.tab = 'video';
@@ -290,7 +291,12 @@ export class Exporter {
         ['Est. size', batch ? '—' : '…', 'size'],
         ['File', batch ? 'One per clip' : outputName(it.name, s.layout, CONTAINERS[o.container].ext)]
       );
-      startLabel = batch ? `Export ${this.items.length} videos` : 'Start export';
+      const nImages = this.items.filter((i) => i.kind === 'image').length;
+      const nVideos = this.items.length - nImages;
+      if (batch && nImages) {
+        specRows.push(['Photos', `${nImages} × ${o.still.toUpperCase()} still${nImages > 1 ? 's' : ''}`]);
+      }
+      startLabel = batch ? `Export ${nVideos} video${nVideos > 1 ? 's' : ''}${nImages ? ` + ${nImages} photo${nImages > 1 ? 's' : ''}` : ''}` : 'Start export';
     } else if (o.tab === 'frame' || o.tab === 'still') {
       form.append(
         field('Layout', layoutSel, LAYOUTS[s.layout]?.hint),
@@ -562,6 +568,27 @@ export class Exporter {
         results.push({ ...res, name: res.name ?? name, source: it });
         if (res.blob) download(res.blob, name);
       }
+      const photos = this.items.filter((i) => i.kind === 'image');
+      for (let i = 0; i < photos.length; i++) {
+        const it = photos[i];
+        ui.subtitle.textContent = `[photo ${i + 1}/${photos.length}] ${it.name}`;
+        const bmp = await this.app.bitmapFor(it);
+        if (!bmp) continue;
+        const blob = await renderStill({ source: bmp, width: bmp.width, height: bmp.height, settings: s, engine: this.app.engine, format: o.still, scale: o.stillScale });
+        const ext = o.still === 'jpeg' ? 'jpg' : o.still;
+        const name = outputName(it.name, o.still === 'jps' ? 'sbs-full' : s.layout, ext);
+        if (dirHandle) {
+          const fh = await dirHandle.getFileHandle(name, { create: true });
+          const w = await fh.createWritable();
+          await w.write(blob);
+          await w.close();
+          results.push({ bytes: blob.size, frames: 0, name, streamed: true });
+        } else {
+          download(blob, name);
+          results.push({ blob, bytes: blob.size, frames: 0, name });
+        }
+        ui.set({ progress: (i + 1) / photos.length, frames: i + 1 });
+      }
       this.running = false;
       const bytes = results.reduce((a, r) => a + r.bytes, 0);
       const frames = results.reduce((a, r) => a + r.frames, 0);
@@ -569,7 +596,7 @@ export class Exporter {
       this.doneView({
         title: 'Export complete',
         lines: [
-          results.length > 1 ? `${results.length} videos exported.` : `Saved ${results[0]?.name ?? ''}${results[0]?.streamed ? ' to disk' : ''}.`,
+          results.length > 1 ? `${results.length} files exported.` : `Saved ${results[0]?.name ?? ''}${results[0]?.streamed ? ' to disk' : ''}.`,
           ['Total size', formatBytes(bytes)],
           ['Frames', String(frames)],
           ['Time', formatDuration(elapsed)],
