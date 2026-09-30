@@ -17,6 +17,9 @@ AI depth estimation, occlusion-aware stereo view synthesis and hardware video en
 | **Export** | WebCodecs hardware encoding to MP4 / MOV / WebM / MKV with H.264, HEVC, AV1 or VP9 · original audio copied bit-exact when possible · In/Out trimming · resolution and frame-rate conversion · stream straight to disk for unlimited length · batch export of the whole media bin. Filenames follow player conventions (`clip.3D.HSBS.mp4`). |
 | **Photos** | PNG / JPEG / WebP / JPS stills, plus **3D motion** videos (orbit, sway, dolly-zoom, swing, wigglegram) from a single photo. |
 | **Live** | Convert your camera or any screen / window / tab to 3D in real time, and record the result. |
+| **VR** | *View in VR* (WebXR) puts the live stereo pair on a virtual cinema screen in your headset — each eye sees its own synthesised view, no export needed. |
+| **Bring your own model** | Load any ONNX depth network (NCHW RGB in, relative depth out) for the session, with ImageNet or 0–1 input and ×14 / ×32 size snapping. |
+| **App** | Installable PWA that works offline after the first visit; open video and image files straight from the OS once installed. Smooth-playback preview keeps video at full frame rate while slower models catch up. |
 
 ## Workflow
 

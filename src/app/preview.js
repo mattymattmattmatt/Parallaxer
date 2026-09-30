@@ -33,7 +33,6 @@ export class Preview {
     this.stats = null;
     this.animStart = performance.now();
 
-    this.vfc = this.vfc.bind(this);
     video.addEventListener('seeked', () => this.#videoFrame(false));
     video.addEventListener('loadeddata', () => this.#videoFrame(false));
 
@@ -57,6 +56,9 @@ export class Preview {
   }
 
   clear() {
+    this.gen = (this.gen ?? 0) + 1;
+    this.lastMediaTime = -1;
+    this.processedTime = null;
     this.video.pause();
     this.video.removeAttribute('src');
     this.video.srcObject = null;
@@ -91,12 +93,20 @@ export class Preview {
     this.#armVfc();
   }
 
+  // Each source gets its own callback chain; the generation counter retires chains from earlier sources.
   #armVfc() {
+    const gen = (this.gen = (this.gen ?? 0) + 1);
+    const live = () => gen === this.gen && this.source?.el === this.video;
     if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
-      this.video.requestVideoFrameCallback(this.vfc);
+      const cb = (_now, md) => {
+        if (!live()) return;
+        this.vfc(md.mediaTime);
+        this.video.requestVideoFrameCallback(cb);
+      };
+      this.video.requestVideoFrameCallback(cb);
     } else {
       const poll = () => {
-        if (!this.source || this.source.el !== this.video) return;
+        if (!live()) return;
         if (!this.video.paused) this.#videoFrame(true);
         requestAnimationFrame(poll);
       };
@@ -104,13 +114,10 @@ export class Preview {
     }
   }
 
-  vfc(_now, md) {
-    if (!this.source || this.source.el !== this.video) return;
-    const t = md.mediaTime;
+  vfc(t) {
     const continuous = this.source.kind === 'live' || (t > this.lastMediaTime && t - this.lastMediaTime < 0.3);
     this.lastMediaTime = t;
     this.#videoFrame(continuous, t);
-    this.video.requestVideoFrameCallback(this.vfc);
   }
 
   #videoFrame(continuous, mediaTime = this.video.currentTime) {
@@ -144,6 +151,11 @@ export class Preview {
     if (!src) return;
     if (this.busy) {
       this.again = { continuous: this.again ? this.again.continuous && continuous : continuous };
+      // Smooth playback: show every decoded frame with the most recent depth while inference catches up.
+      if (src.kind !== 'image' && this.store.state.smoothPlayback && continuous && src.w) {
+        this.renderer.uploadSource(src.el, src.w, src.h);
+        this.requestDraw();
+      }
       return;
     }
     if (!this.engine.ready) {

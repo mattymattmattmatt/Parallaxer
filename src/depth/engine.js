@@ -172,7 +172,7 @@ export class DepthEngine {
    * @param {{ preferBackend?: 'auto'|'webgpu'|'wasm', gpu?: object|null, onProgress?: Function, onStatus?: Function, signal?: AbortSignal }} opts
    */
   async load(id, opts = {}) {
-    const model = getModel(id);
+    const model = typeof id === 'object' ? id : getModel(id);
     const task = this.queue.then(() => this.#load(model, opts));
     this.queue = task.catch(() => {});
     return task;
@@ -191,7 +191,7 @@ export class DepthEngine {
     }
 
     const wantGpu = preferBackend !== 'wasm' && !!gpu;
-    const useFp16 = wantGpu && gpu.f16 && !!model.urlFp16;
+    const useFp16 = wantGpu && gpu.f16 && !!model.urlFp16 && !model.bytes;
     const attempts = [];
     if (wantGpu) attempts.push({ backend: 'webgpu', fp16: useFp16 });
     if (wantGpu && useFp16) attempts.push({ backend: 'webgpu', fp16: false });
@@ -204,7 +204,7 @@ export class DepthEngine {
       try {
         const url = a.fp16 ? model.urlFp16 : model.url;
         const size = a.fp16 ? model.sizeFp16 : model.size;
-        let data = a.fp16 ? bytesFp16 : bytes;
+        let data = model.bytes ?? (a.fp16 ? bytesFp16 : bytes);
         if (!data) {
           onStatus?.(`Fetching ${model.name}${a.fp16 ? ' (fp16)' : ''}…`);
           data = await fetchCached(url, { onProgress, signal, expectedSize: size });

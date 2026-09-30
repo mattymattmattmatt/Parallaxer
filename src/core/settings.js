@@ -49,6 +49,9 @@ export const DEFAULTS = {
   model: 'midas-small',
   detail: 'high',
   backend: 'auto',
+  smoothPlayback: true,
+  customNorm: 'imagenet',
+  customMultiple: 14,
 
   strength: 2.4,
   convergence: 0.55,

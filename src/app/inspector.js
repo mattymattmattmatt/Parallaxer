@@ -114,6 +114,34 @@ export function buildInspector(root, store, app) {
   controls.push({ el: modelList, keys: ['model'], sync: renderModels });
   renderModels();
 
+  const customInput = h('input', { type: 'file', accept: '.onnx', hidden: true });
+  customInput.addEventListener('change', () => {
+    const f = customInput.files?.[0];
+    customInput.value = '';
+    if (f) app.loadCustomModel(f);
+  });
+  const customBox = h('div', { class: 'custom-model' });
+  const renderCustom = () => {
+    const cm = app.customModel;
+    const on = store.state.model === 'custom';
+    customBox.replaceChildren(
+      cm
+        ? h(
+            'button',
+            { type: 'button', class: `model${on ? ' on' : ''}`, onclick: () => store.set({ model: 'custom' }) },
+            h('span', { class: 'model-name' }, cm.name),
+            h('span', { class: 'model-tag' }, 'Custom'),
+            h('span', { class: 'model-meta' }, h('span', {}, formatBytes(cm.size)), h('span', {}, 'This session only'))
+          )
+        : null,
+      h('button', { type: 'button', class: 'btn subtle block', onclick: () => customInput.click(), title: 'Use any ONNX depth network (NCHW RGB input, single depth output)' }, icon('plus'), cm ? 'Replace custom ONNX model…' : 'Load custom ONNX model…'),
+      customInput
+    );
+  };
+  app.onCustomModel = renderCustom;
+  controls.push({ el: customBox, keys: ['model'], sync: renderCustom });
+  renderCustom();
+
   const engineStatus = h('dl', { class: 'engine-status' });
   const renderEngine = () => {
     const e = app.engineInfo();
@@ -128,14 +156,49 @@ export function buildInspector(root, store, app) {
   app.onEngineInfo = renderEngine;
   renderEngine();
 
+  // Options row for custom networks, shown only while a custom model is selected.
+  const customRow = (...args) => {
+    const row = h(...args);
+    controls.push({ el: row, keys: ['model'], sync: () => (row.hidden = store.state.model !== 'custom') });
+    row.hidden = store.state.model !== 'custom';
+    return row;
+  };
+
   const depthSec = section('engine', 'Depth engine', 'cpu', [
     modelList,
+    customBox,
+    customRow(
+      'div',
+      { class: 'row2' },
+      add(
+        segmented(store, 'customNorm', {
+          label: 'Input range',
+          options: [
+            { value: 'imagenet', label: 'ImageNet', hint: '(rgb − mean) / std' },
+            { value: 'none', label: '0 – 1', hint: 'Plain RGB in [0, 1]' }
+          ],
+          disabled: (s) => s.model !== 'custom',
+          deps: ['model']
+        })
+      ),
+      add(
+        segmented(store, 'customMultiple', {
+          label: 'Size multiple',
+          options: [
+            { value: 14, label: '14', hint: 'Vision transformers (DINOv2 / Depth Anything)' },
+            { value: 32, label: '32', hint: 'Convolutional encoders' }
+          ],
+          disabled: (s) => s.model !== 'custom',
+          deps: ['model']
+        })
+      )
+    ),
     add(
       segmented(store, 'detail', {
         label: 'Detail',
         hint: 'Network resolution for models with flexible input',
         options: DETAIL_LEVELS.map((l) => ({ value: l.id, label: l.label, hint: `${l.short}px short side` })),
-        disabled: (s) => !!MODELS.find((m) => m.id === s.model)?.input.fixed,
+        disabled: (s) => (s.model === 'custom' ? !!app.customFixed : !!MODELS.find((m) => m.id === s.model)?.input.fixed),
         deps: ['model']
       })
     ),
@@ -149,6 +212,7 @@ export function buildInspector(root, store, app) {
         ]
       })
     ),
+    add(toggle(store, 'smoothPlayback', { label: 'Smooth playback', hint: 'While playing, show every frame with the latest depth instead of waiting for inference. Paused frames and exports are always frame-exact.' })),
     engineStatus
   ]);
 
@@ -344,5 +408,11 @@ export function buildInspector(root, store, app) {
     for (const c of controls) if (c.keys.some((k) => changed.includes(k))) c.sync();
   });
 
-  return { refreshModels: renderModels, refreshEngine: renderEngine };
+  return {
+    refreshModels: renderModels,
+    refreshEngine: () => {
+      renderEngine();
+      for (const c of controls) if (c.keys.includes('model')) c.sync();
+    }
+  };
 }

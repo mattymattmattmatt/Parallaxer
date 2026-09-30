@@ -422,6 +422,7 @@ button {
   text-align: center;
 }
 .bin-item {
+  cursor: pointer;
   display: grid;
   grid-template-columns: 64px 1fr auto;
   gap: 9px;
@@ -1966,4 +1967,14 @@ kbd {
   margin-right: 6px;
   border-color: rgba(31, 216, 240, 0.35);
   background: linear-gradient(90deg, rgba(255, 61, 110, 0.12), rgba(31, 216, 240, 0.12));
+}
+
+.custom-model {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.custom-model .btn {
+  height: 28px;
+  font-size: 12px;
 }

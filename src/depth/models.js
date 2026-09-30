@@ -52,6 +52,19 @@ export const MODELS = [
   }
 ];
 
+/** Template for a user-supplied ONNX depth network (bytes are attached at runtime). */
+export const CUSTOM_MODEL = {
+  id: 'custom',
+  name: 'Custom model',
+  tag: 'Custom',
+  description: 'Your own ONNX depth network. Output must be relative depth; use Invert depth if near is dark.',
+  license: 'User supplied',
+  local: true,
+  norm: 'imagenet',
+  input: { multiple: 14 },
+  output: 'disparity'
+};
+
 /** Short-side resolutions offered for models with dynamic input. */
 export const DETAIL_LEVELS = [
   { id: 'fast', label: 'Fast', short: 266 },

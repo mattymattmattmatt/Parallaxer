@@ -4,7 +4,7 @@ import { h, $, Store, clamp, timecode, formatBytes, formatDuration } from './ui/
 import { icon, LOGO_SVG } from './ui/icons.js';
 import { Timeline } from './ui/widgets.js';
 import { DepthEngine, detectWebGPU, isModelCached, clearModelCache } from './depth/engine.js';
-import { getModel } from './depth/models.js';
+import { getModel, CUSTOM_MODEL } from './depth/models.js';
 import { loadSettings, saveSettings, VIEWS, LAYOUTS } from './core/settings.js';
 import { classifyFile, probeVideo, codecName } from './media/probe.js';
 import { Preview } from './app/preview.js';
@@ -160,7 +160,7 @@ function renderHud() {
   const parts = [];
   if (engine.ready) {
     parts.push(h('span', { class: engine.backend === 'webgpu' ? 'gpu' : '' }, engine.backend === 'webgpu' ? 'WEBGPU' : 'CPU'));
-    parts.push(h('span', {}, getModel(engine.model?.id).name));
+    parts.push(h('span', {}, engine.model?.name ?? ''));
   } else {
     parts.push(h('span', {}, 'Depth engine loading…'));
   }
@@ -188,13 +188,40 @@ function setEngineChip(state, text) {
   $('#engineText').textContent = text;
 }
 
+function currentModel() {
+  const s = store.state;
+  if (s.model === 'custom') return app.customModel ?? getModel('midas-small');
+  return getModel(s.model);
+}
+
+app.loadCustomModel = async (file) => {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  app.customModel = {
+    ...CUSTOM_MODEL,
+    name: file.name.replace(/\.onnx$/i, ''),
+    size: file.size,
+    bytes,
+    norm: store.state.customNorm,
+    input: { multiple: store.state.customMultiple }
+  };
+  app.customModel.key = `${file.name}:${file.size}:${Date.now()}`;
+  app.onCustomModel?.();
+  if (store.state.model !== 'custom') store.set({ model: 'custom' });
+  else engineKey = null;
+  await ensureEngine();
+};
+
 function ensureEngine() {
   const s = store.state;
-  const key = `${s.model}|${s.backend}`;
+  if (s.model === 'custom' && !app.customModel) {
+    store.set({ model: 'midas-small' }, { undoable: false });
+    return Promise.resolve();
+  }
+  const key = `${s.model}|${s.backend}|${s.model === 'custom' ? app.customModel.key : ''}`;
   if (engine.ready && engineKey === key) return Promise.resolve();
   if (engineLoading && engineLoadingKey === key) return engineLoading;
   engineLoadingKey = key;
-  const model = getModel(s.model);
+  const model = currentModel();
   setEngineChip('busy', `Loading ${model.name}…`);
   const showLoader = () => {
     loader.hidden = false;
@@ -204,7 +231,7 @@ function ensureEngine() {
   const bar = $('#loaderBar');
   bar.parentElement.classList.add('indeterminate');
   const p = engine
-    .load(model.id, {
+    .load(model.bytes ? model : model.id, {
       preferBackend: s.backend,
       gpu,
       onStatus: (msg) => ($('#loaderSub').textContent = msg),
@@ -222,6 +249,7 @@ function ensureEngine() {
     .then((info) => {
       if (engineLoadingKey !== key) return;
       engineKey = key;
+      app.customFixed = model === app.customModel && !!engine.fixedSize;
       setEngineChip('ready', `${info.backend === 'webgpu' ? 'WebGPU' : 'CPU'} · ${model.name.replace('Depth Anything V2', 'DA-V2')}`);
       preview.fp.reset();
       preview.refresh();
@@ -281,7 +309,25 @@ function renderBin() {
           e.stopPropagation();
           removeItem(it);
         });
-        return h('button', { type: 'button', class: `bin-item${it === current ? ' active' : ''}`, onclick: () => selectItem(it) }, thumb, h('div', { class: 'bin-info' }, h('div', { class: 'bin-name', title: it.name }, it.name), meta), rm);
+        const row = h(
+          'div',
+          { class: `bin-item${it === current ? ' active' : ''}`, role: 'button', tabindex: '0', 'aria-current': it === current ? 'true' : null, onclick: () => selectItem(it) },
+          thumb,
+          h('div', { class: 'bin-info' }, h('div', { class: 'bin-name', title: it.name }, it.name), meta),
+          rm
+        );
+        row.addEventListener('keydown', (e) => {
+          if (e.target !== row) return;
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            e.stopPropagation();
+            selectItem(it);
+          } else if (e.key === 'Delete' || e.key === 'Backspace') {
+            e.stopPropagation();
+            removeItem(it);
+          }
+        });
+        return row;
       })
     );
   }
@@ -667,6 +713,14 @@ store.subscribe((s, changed) => {
     preview.fp.reset();
     preview.refresh();
   }
+  if ((changed.includes('customNorm') || changed.includes('customMultiple')) && app.customModel) {
+    app.customModel.norm = s.customNorm;
+    app.customModel.input = { multiple: s.customMultiple };
+    if (s.model === 'custom') {
+      preview.fp.reset();
+      preview.refresh();
+    }
+  }
   if (changed.includes('view')) syncView(true);
   if (changed.includes('layout') && s.view === 'output') syncView(true);
   preview.requestDraw();
@@ -1016,6 +1070,7 @@ $('#vrBtn').addEventListener('click', async () => {
 
 async function boot() {
   renderBin();
+  if (store.state.model === 'custom') store.set({ model: 'midas-small' }, { undoable: false });
   gpu = await detectWebGPU();
   app.gpuF16 = !!gpu?.f16;
   inspector.refreshModels();
