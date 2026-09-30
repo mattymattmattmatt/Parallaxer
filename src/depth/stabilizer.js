@@ -4,8 +4,9 @@ const RANGE_BINS = 1024;
 /**
  * Turns raw, affine-invariant network output into a stable nearness map (1 = closest).
  *
- *  - Robust percentile normalisation (ignores specular outliers / sky noise).
- *  - Temporal smoothing of the normalisation range, so global depth doesn't "breathe".
+ *  - Robust per-frame percentile normalisation, which cancels the network's per-frame scale/shift.
+ *  - Scale/shift alignment to the previous frame, fitted on static pixels only, so global depth doesn't
+ *    "breathe" when content changes.
  *  - Motion-gated per-pixel temporal filter: static regions are denoised, moving regions follow the new
  *    estimate immediately (gated on both depth change and colour change).
  *  - Scene-cut detection resets all temporal state.
@@ -19,8 +20,6 @@ export class DepthStabilizer {
   reset() {
     this.prev = null;
     this.prevLuma = null;
-    this.lo = null;
-    this.hi = null;
     this.w = 0;
     this.h = 0;
     this.frames = 0;
@@ -94,38 +93,72 @@ export class DepthStabilizer {
     };
     const pLo = pick(0.01);
     const pHi = pick(0.995);
+    const range = Math.max(1e-6, pHi - pLo);
 
-    if (cut || this.lo === null) {
-      this.lo = pLo;
-      this.hi = pHi;
-    } else {
-      const a = 1 - 0.92 * temporal;
-      this.lo += (pLo - this.lo) * a;
-      this.hi += (pHi - this.hi) * a;
-    }
-    const lo = this.lo;
-    const range = Math.max(1e-6, this.hi - lo);
-
+    // 1) Per-frame robust normalisation. Depth networks output affine-invariant depth (arbitrary scale and
+    //    shift every frame); normalising each frame by its own percentiles cancels that jitter exactly.
     const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const v = (raw[i] - pLo) / range;
+      out[i] = v > 0 ? (v < 1 ? v : 1) : 0; // also maps NaN to 0
+    }
+
     const prev = this.prev;
     if (!cut && prev && temporal > 0) {
+      const prevLuma = this.prevLuma;
+      const invC = 1 / (2 * 0.045 * 0.045);
+
+      // 2) Align this frame to the previous stabilised frame with a scale/shift fitted by weighted least
+      //    squares on static pixels (unchanged colour). Removes the global "breathing" that happens when
+      //    content entering the frame changes the percentiles; a small leak lets any drift decay.
+      let sw = 0;
+      let sx = 0;
+      let sy = 0;
+      let sxx = 0;
+      let sxy = 0;
+      for (let i = 0; i < n; i += 2) {
+        const dc = luma[i] - prevLuma[i];
+        const w = Math.exp(-dc * dc * invC);
+        const x = out[i];
+        const y = prev[i];
+        sw += w;
+        sx += w * x;
+        sy += w * y;
+        sxx += w * x * x;
+        sxy += w * x * y;
+      }
+      const det = sw * sxx - sx * sx;
+      if (sw > n * 0.05 && det > 1e-9) {
+        let scale = (sw * sxy - sx * sy) / det;
+        scale = Math.min(3, Math.max(0.33, scale));
+        const shift = (sy - scale * sx) / sw;
+        // Leak back toward per-frame normalisation so errors can't accumulate: ~0.3 s time constant at low
+        // stabilisation, ~2 s at high.
+        const leak = 0.02 + 0.3 * (1 - temporal) ** 2;
+        const k = 1 - leak;
+        const a = 1 + (scale - 1) * k;
+        const b = shift * k;
+        for (let i = 0; i < n; i++) out[i] = out[i] * a + b;
+      }
+
+      // 3) Motion-gated per-pixel filter: static pixels are denoised, moving ones follow the new estimate.
       const keep = 0.9 * temporal;
       const invD = 1 / (2 * 0.05 * 0.05);
-      const invC = 1 / (2 * 0.045 * 0.045);
-      const prevLuma = this.prevLuma;
       for (let i = 0; i < n; i++) {
-        let v = (raw[i] - lo) / range;
-        v = v > 0 ? (v < 1 ? v : 1) : 0; // also maps NaN to 0
+        const v = out[i];
         const dd = v - prev[i];
         const dc = luma[i] - prevLuma[i];
         const wgt = keep * Math.exp(-dd * dd * invD - dc * dc * invC);
         out[i] = v + wgt * (prev[i] - v);
       }
-    } else {
-      for (let i = 0; i < n; i++) {
-        const v = (raw[i] - lo) / range;
-        out[i] = v > 0 ? (v < 1 ? v : 1) : 0;
-      }
+    }
+
+    // Temporal state stays unclamped (keeps the alignment linear); the renderer gets [0, 1].
+    const state = out;
+    const depth = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const v = state[i];
+      depth[i] = v > 0 ? (v < 1 ? v : 1) : 0;
     }
 
     // Statistics for the UI and automatic controls.
@@ -142,7 +175,7 @@ export class DepthStabilizer {
     for (let y = 0; y < h; y++) {
       const wy = Math.exp(-((y - cy) ** 2) / sig2y);
       for (let x = 0; x < w; x++) {
-        const v = out[y * w + x];
+        const v = depth[y * w + x];
         hist[Math.min(HIST_BINS - 1, (v * HIST_BINS) | 0)]++;
         const wgt = wy * Math.exp(-((x - cx) ** 2) / sig2x) * (0.35 + v);
         subjectAcc += v * wgt;
@@ -155,14 +188,14 @@ export class DepthStabilizer {
     for (let b = 0; b < HIST_BINS; b++) histMax = Math.max(histMax, hist[b]);
     for (let b = 0; b < HIST_BINS; b++) hist[b] /= histMax || 1;
 
-    this.prev = out;
+    this.prev = state;
     this.prevLuma = luma;
     this.w = w;
     this.h = h;
     this.frames++;
 
     return {
-      depth: out,
+      depth,
       w,
       h,
       cut: cut && this.frames > 1,
