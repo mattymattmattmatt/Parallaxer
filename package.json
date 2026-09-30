@@ -1,21 +1,23 @@
 {
   "name": "parallaxer",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --config vite.config.local.js",
-    "build:local": "vite build --config vite.config.local.js",
-    "build:pages": "vite build --config vite.config.pages.js",
-    "preview": "vite preview --config vite.config.local.js"
+    "dev": "vite",
+    "build": "vite build",
+    "build:pages": "vite build",
+    "preview": "vite preview"
   },
   "dependencies": {
-    "@ffmpeg/core": "^0.12.6",
-    "@ffmpeg/ffmpeg": "^0.12.10",
-    "@ffmpeg/util": "^0.12.1",
-    "onnxruntime-web": "^1.22.0"
+    "mediabunny": "^1.61.0",
+    "onnxruntime-web": "^1.30.0"
   },
   "devDependencies": {
-    "vite": "^5.4.11"
+    "vite": "^8.3.1"
+  },
+  "description": "Professional 2D-to-3D stereo conversion for video and images, entirely in the browser.",
+  "engines": {
+    "node": ">=20.19"
   }
 }

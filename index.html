@@ -3,119 +3,142 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Parallaxer</title>
-    <link rel="icon" href="favicon.ico" />
+    <title>Parallaxer — 2D to 3D Studio</title>
+    <meta name="description" content="Convert any video or photo to stereoscopic 3D (SBS, top-bottom, anaglyph, RGB-D) with AI depth estimation — entirely in your browser. Nothing is uploaded." />
+    <meta name="theme-color" content="#0a0b0e" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="alternate icon" href="favicon.ico" />
   </head>
   <body>
-    <div class="app">
-      <header class="header">
+    <div id="app" class="app" data-media="none">
+      <header class="topbar">
         <div class="brand">
-          <img class="logo" src="ParallaxerLogo.png" alt="Parallaxer logo" />
-          <div>
-            <div class="title">Parallaxer</div>
-            <div class="subtitle">Browser-only Side-by-Side 3D (Depth + ffmpeg.wasm)</div>
-          </div>
+          <span class="brand-mark" id="brandMark"></span>
+          <span class="brand-name">Parallaxer</span>
+          <span class="brand-tag">Studio</span>
         </div>
-        <div class="pill">Local · Private · No Uploads</div>
+
+        <div class="doc" id="doc">
+          <span class="doc-name" id="docName">Untitled</span>
+          <span class="doc-meta" id="docMeta"></span>
+        </div>
+
+        <div class="top-actions">
+          <div class="btn-group">
+            <button class="btn ghost" id="openBtn" title="Open video or photo (Ctrl+O)"></button>
+            <button class="btn ghost" id="camBtn" title="Live camera to 3D"></button>
+            <button class="btn ghost" id="screenBtn" title="Capture a screen, window or tab and convert it live"></button>
+          </div>
+          <span class="divider"></span>
+          <button class="icon-btn" id="undoBtn" title="Undo (Ctrl+Z)"></button>
+          <button class="icon-btn" id="redoBtn" title="Redo (Ctrl+Shift+Z)"></button>
+          <button class="engine" id="engineBtn" title="Depth engine and system capabilities">
+            <span class="engine-dot"></span><span class="engine-text" id="engineText">Engine idle</span>
+          </button>
+          <button class="icon-btn" id="helpBtn" title="Keyboard shortcuts (?)"></button>
+          <button class="btn primary" id="exportBtn" title="Export (Ctrl+E)" disabled></button>
+        </div>
       </header>
 
-      <main class="grid">
-        <section class="card">
-          <h2>1) Input</h2>
-          <p class="muted">
-            Select a video file. Processing is CPU/GPU intensive; start with a short clip (5–10s).
-          </p>
+      <main class="workspace">
+        <aside class="bin" id="bin" aria-label="Media bin">
+          <div class="pane-head">
+            <span>Media</span>
+            <button class="icon-btn sm" id="binAddBtn" title="Add files"></button>
+          </div>
+          <div class="bin-list" id="binList"></div>
+          <div class="bin-foot">
+            <button class="btn subtle block" id="batchBtn" disabled>Batch export all</button>
+          </div>
+        </aside>
 
-          <label class="file">
-            <input id="file" type="file" accept="video/*" />
-            <span id="fileLabel">Choose a video…</span>
-          </label>
-          <div class="fileMeta" id="fileMeta">No file selected.</div>
-
-          <div class="row">
-            <div class="field">
-              <label for="fps">Frame rate (processing)</label>
-              <input id="fps" type="number" min="1" max="30" value="8" inputmode="numeric" />
-            </div>
-            <div class="field">
-              <label for="maxW">Max width (downscale)</label>
-              <input id="maxW" type="number" min="240" max="1920" value="512" inputmode="numeric" />
+        <section class="stage" aria-label="Viewer">
+          <div class="viewbar">
+            <div class="seg views" id="views" role="tablist"></div>
+            <div class="viewbar-right">
+              <button class="icon-btn" id="compareBtn" title="Hold to compare with original (\)"></button>
+              <button class="icon-btn" id="hudBtn" title="Toggle stats overlay (H)"></button>
+              <button class="icon-btn" id="fsBtn" title="Fullscreen (F)"></button>
             </div>
           </div>
 
-          <div class="row">
-            <div class="field">
-              <label for="strength">Depth strength</label>
-              <input id="strength" type="number" min="1" max="40" value="12" inputmode="numeric" aria-describedby="strengthHint" />
-              <div class="hint" id="strengthHint">Higher = more 3D, more artifacts.</div>
+          <div class="viewer" id="viewer">
+            <video id="srcVideo" class="src-video" playsinline preload="auto"></video>
+            <canvas id="view" class="view-canvas"></canvas>
+            <div class="hud" id="hud" hidden></div>
+            <div class="cut-flash" id="cutFlash">Scene cut</div>
+            <div class="view-hint" id="viewHint"></div>
+            <div class="loader" id="loader" hidden>
+              <div class="loader-card">
+                <div class="loader-title" id="loaderTitle">Preparing depth engine</div>
+                <div class="loader-sub" id="loaderSub"></div>
+                <div class="bar"><div class="bar-fill" id="loaderBar"></div></div>
+              </div>
             </div>
-            <div class="field">
-              <label for="maxFrames">Max frames</label>
-              <input id="maxFrames" type="number" min="1" max="9999" value="120" inputmode="numeric" aria-describedby="maxFramesHint" />
-              <div class="hint" id="maxFramesHint">Limit to avoid memory crashes.</div>
+            <div class="empty" id="empty">
+              <div class="empty-card">
+                <div class="empty-art" aria-hidden="true">
+                  <span class="ea l"></span><span class="ea r"></span>
+                </div>
+                <h1>Turn any video or photo into real 3D</h1>
+                <p>AI depth estimation, occlusion-aware view synthesis and hardware encoding — running entirely on your device. Nothing is uploaded.</p>
+                <div class="empty-actions">
+                  <button class="btn primary lg" id="emptyOpen"></button>
+                  <button class="btn lg" id="emptySample"></button>
+                </div>
+                <div class="empty-sub">
+                  or drop files anywhere · paste an image · <button class="link" id="emptyCam">use your camera</button> · <button class="link" id="emptyScreen">convert your screen live</button>
+                </div>
+                <div class="caps" id="caps"></div>
+              </div>
             </div>
           </div>
 
-          <h3>Output settings</h3>
-          <div class="row">
-            <div class="field">
-              <label for="crf">Quality (CRF)</label>
-              <input id="crf" type="number" min="12" max="30" value="18" inputmode="numeric" aria-describedby="crfHint" />
-              <div class="hint" id="crfHint">Lower = larger file, higher quality.</div>
+          <div class="transport" id="transport">
+            <div class="tp-left">
+              <button class="icon-btn" id="startBtn" title="Go to start / In point (Home)"></button>
+              <button class="icon-btn" id="backBtn" title="Previous frame (←)"></button>
+              <button class="icon-btn play" id="playBtn" title="Play / pause (Space)"></button>
+              <button class="icon-btn" id="fwdBtn" title="Next frame (→)"></button>
+              <button class="icon-btn" id="endBtn" title="Go to end / Out point (End)"></button>
+              <div class="tc"><span id="tcNow">00:00:00:00</span><span class="tc-sep">/</span><span id="tcDur">00:00:00:00</span></div>
             </div>
-            <div class="field">
-              <label for="preset">Encoding speed</label>
-              <select id="preset" class="select">
-                <option value="ultrafast">Ultrafast</option>
-                <option value="superfast">Superfast</option>
-                <option value="veryfast" selected>Veryfast</option>
-                <option value="faster">Faster</option>
-                <option value="fast">Fast</option>
-                <option value="medium">Medium</option>
-              </select>
-              <div class="hint">Faster = bigger file, slower = smaller file.</div>
+            <div class="tp-mid">
+              <button class="chip" id="inBtn" title="Set In point (I)">In <b id="inVal">—</b></button>
+              <button class="chip" id="outBtn" title="Set Out point (O)">Out <b id="outVal">—</b></button>
+              <button class="icon-btn sm" id="clearRangeBtn" title="Clear In/Out (X)"></button>
+            </div>
+            <div class="tp-right">
+              <button class="icon-btn" id="loopBtn" title="Loop playback (L)"></button>
+              <div class="select-wrap mini">
+                <select class="select" id="rateSel" title="Playback speed">
+                  <option value="0.25">0.25×</option>
+                  <option value="0.5">0.5×</option>
+                  <option value="1" selected>1×</option>
+                  <option value="1.5">1.5×</option>
+                  <option value="2">2×</option>
+                </select>
+              </div>
+              <button class="icon-btn" id="muteBtn" title="Mute (M)"></button>
+              <input type="range" class="range vol" id="volRange" min="0" max="1" step="0.01" value="0.8" aria-label="Volume" />
             </div>
           </div>
-          <label class="check">
-            <input id="includeAudio" type="checkbox" checked />
-            <span>Include original audio (if present)</span>
-          </label>
-
-          <div class="actions">
-            <button id="loadBtn" class="btn secondary">Load Engines</button>
-            <button id="runBtn" class="btn primary" disabled>Generate SBS MP4</button>
-          </div>
-
-          <div class="barWrap">
-            <div class="bar" id="bar" style="width:0%"></div>
-          </div>
-          <div class="status" id="status" role="status" aria-live="polite">Idle.</div>
+          <div id="timelineHost" class="timeline-host"></div>
         </section>
 
-        <section class="card">
-          <h2>2) Output</h2>
-          <p class="muted">
-            When finished, download the SBS video. This creates a standard SBS layout (left|right).
-          </p>
-
-          <div class="output">
-            <a id="download" class="btn primary" download="Parallaxer_SBS.mp4" style="display:none;">Download SBS MP4</a>
-            <video id="preview" controls playsinline style="display:none;"></video>
-          </div>
-
-          <h3>Log</h3>
-          <pre id="log" class="log" aria-live="polite" aria-label="Processing log"></pre>
-        </section>
+        <aside class="inspector" id="inspector" aria-label="Inspector"></aside>
       </main>
 
-      <footer class="footer">
-        <div class="muted">
-          This browser version uses in-browser inference + WebAssembly encoding. Long/high-res videos may be slow.
-        </div>
-      </footer>
+      <div class="toasts" id="toasts" aria-live="polite"></div>
+      <div class="drop-overlay" id="dropOverlay"><div>Drop to add to the media bin</div></div>
     </div>
+
+    <dialog class="modal" id="exportDlg"></dialog>
+    <dialog class="modal narrow" id="helpDlg"></dialog>
+    <dialog class="modal narrow" id="sysDlg"></dialog>
+    <input type="file" id="fileInput" accept="video/*,image/*,.mkv,.mov,.m4v,.webm" multiple hidden />
 
     <script type="module" src="./src/main.js"></script>
   </body>
 </html>
-
