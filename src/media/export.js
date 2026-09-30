@@ -115,6 +115,20 @@ export async function pickSaveFile(suggestedName, container) {
   });
 }
 
+/**
+ * Give the browser a turn between frames. With CPU (WASM) inference and pre-decoded frames the export can
+ * otherwise run back-to-back without ever returning to the event loop, starving input and rendering so
+ * Pause / Stop / Cancel stop responding. A timeout task queues behind pending input and paint work (unlike
+ * scheduler.yield(), whose continuation jumps the queue), and only kicks in after ~30 ms of busy time.
+ */
+let lastYield = 0;
+async function yieldToUI() {
+  const now = performance.now();
+  if (now - lastYield < 30) return;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  lastYield = performance.now();
+}
+
 export class ExportCancelled extends Error {
   constructor() {
     super('Export cancelled');
@@ -133,7 +147,20 @@ export class VideoExportJob {
     this.frames = 0;
     this.cancelled = false;
     this.paused = false;
+    this.stopRequested = false;
+    this.lastTs = null;
+    this.renderedEnd = 0;
     this.warnings = [];
+  }
+
+  /** End the export at the last rendered frame and finalise a playable file with everything done so far. */
+  stopAndSave() {
+    if (this.state !== 'running' && this.state !== 'paused') return;
+    this.stopRequested = true;
+    this.pauseCtl?.abort();
+    const r = this.resumeResolve;
+    this.resumeResolve = null;
+    r?.();
   }
 
   pause() {
@@ -154,11 +181,18 @@ export class VideoExportJob {
     this.cancelled = true;
     this.pauseCtl?.abort();
     this.resumeResolve?.();
-    try {
-      await this.conversion?.cancel();
-    } catch {
-      /* ignore */
+    for (const c of [this.conversion, this.audioConversion]) {
+      try {
+        await c?.cancel();
+      } catch {
+        /* ignore */
+      }
     }
+  }
+
+  #tidy(input, renderer) {
+    input.dispose();
+    renderer.dispose();
   }
 
   async run() {
@@ -203,6 +237,7 @@ export class VideoExportJob {
         processedWidth: geo.canvasW,
         processedHeight: geo.canvasH,
         process: async (sample) => {
+          await yieldToUI();
           if (this.cancelled) throw new ExportCancelled();
           const t0 = performance.now();
           // drawWithFit applies rotation, flip and pixel aspect ratio and crops coded padding in one GPU draw.
@@ -222,27 +257,84 @@ export class VideoExportJob {
             duration: Math.max(1, Math.round(sample.duration * 1e6))
           });
           this.frames++;
+          this.lastTs = sample.timestamp;
+          this.renderedEnd = sample.timestamp + sample.duration;
+          advanceAudio(sample.timestamp);
           procTime += performance.now() - t0;
           o.onFrame?.({ canvas, frames: this.frames, stats, timestamp: sample.timestamp });
           return new VideoSample(out);
         }
       },
-      audio: o.audio === 'none' ? { discard: true } : {},
-      tags: (tags) => ({ ...tags, comment: `Stereoscopic 3D (${layoutLabel}) converted with Parallaxer` })
+      // Audio runs in its own conversion (below) so it can be held back to the last rendered video frame.
+      audio: { discard: true },
+      // Composable: this job owns the output's lifecycle, which is what lets "Stop & save" finalise early.
+      composable: true
     });
     this.conversion = conversion;
+
+    // Audio is copied (or transcoded when the container needs it) by a second conversion into the same output,
+    // advanced in lockstep behind the video so a partial export never carries audio past its last frame.
+    let audioConv = null;
+    if (o.audio !== 'none') {
+      audioConv = await Conversion.init({
+        input,
+        output,
+        tracks: 'primary',
+        trim: o.trim ?? undefined,
+        showWarnings: false,
+        video: { discard: true },
+        audio: {},
+        composable: true
+      });
+      for (const d of audioConv.discardedTracks) {
+        if (d.reason !== 'discarded_by_user') this.warnings.push(`Audio track dropped (${d.reason.replaceAll('_', ' ')}).`);
+      }
+      if (!audioConv.utilizedTracks.length) audioConv = null;
+    }
+    this.audioConversion = audioConv;
+    let audioRun = null;
+    let audioUntil = -Infinity;
+    let audioError = null;
+    const runAudio = (until) => {
+      audioUntil = until;
+      audioRun = audioConv
+        .execute({ until })
+        .catch((e) => {
+          audioError ??= e;
+        })
+        .finally(() => {
+          audioRun = null;
+        });
+      return audioRun;
+    };
+    const advanceAudio = (t) => {
+      if (audioConv && !audioRun && t > audioUntil) runAudio(t);
+    };
+    const settleAudio = async (until) => {
+      if (!audioConv) return;
+      while (audioRun) await audioRun;
+      if (until > audioUntil) await runAudio(until);
+      if (audioError && !this.cancelled) throw audioError;
+    };
 
     for (const d of conversion.discardedTracks) {
       if (d.reason === 'discarded_by_user') continue;
       this.warnings.push(`${d.track.type === 'audio' ? 'Audio' : 'Video'} track dropped (${d.reason.replaceAll('_', ' ')}).`);
     }
-    if (!conversion.isValid) {
-      input.dispose();
-      renderer.dispose();
+    // Composable conversions are always "valid"; require a usable video track ourselves.
+    if (!conversion.utilizedTracks.some((t) => t.isVideoTrack())) {
+      this.#tidy(input, renderer);
       await writable?.abort?.().catch(() => {});
       const why = conversion.discardedTracks.map((d) => `${d.track.type}: ${d.reason.replaceAll('_', ' ')}`).join('; ');
       throw new Error(`This file can't be converted in this browser (${why || 'no usable tracks'}).`);
     }
+
+    // Composable conversions leave metadata to the output's owner: carry the source tags over.
+    const inputTags = await input.getMetadataTags().catch(() => ({}));
+    const tags = { ...inputTags, comment: `Stereoscopic 3D (${layoutLabel}) converted with Parallaxer` };
+    delete tags.raw;
+    output.setMetadataTags(tags);
+    await output.start();
 
     conversion.onProgress = (progress, time) => {
       const elapsed = (performance.now() - startWall) / 1000;
@@ -257,25 +349,45 @@ export class VideoExportJob {
     };
 
     this.state = 'running';
+    let partial = false;
     try {
       for (;;) {
         this.pauseCtl = new AbortController();
         await conversion.execute({ pauseSignal: this.pauseCtl.signal });
         if (conversion.state === 'done') break;
         if (this.cancelled) throw new ExportCancelled();
+        if (this.stopRequested) {
+          partial = true;
+          break;
+        }
         if (this.paused) {
           this.state = 'paused';
           o.onState?.('paused');
           await new Promise((r) => (this.resumeResolve = r));
           if (this.cancelled) throw new ExportCancelled();
+          if (this.stopRequested) {
+            partial = true;
+            break;
+          }
           this.state = 'running';
           o.onState?.('running');
         }
       }
+      if (partial) {
+        if (!this.frames) throw new ExportCancelled();
+        this.state = 'finishing';
+        o.onState?.('finishing');
+        // Bring audio exactly up to the end of the last rendered frame so both streams end together.
+        await settleAudio(this.renderedEnd);
+      } else {
+        await settleAudio(Infinity);
+      }
+      if (this.cancelled) throw new ExportCancelled();
+      await output.finalize();
     } catch (err) {
       this.state = 'failed';
-      input.dispose();
-      renderer.dispose();
+      await output.cancel().catch(() => {});
+      this.#tidy(input, renderer);
       if (writable) {
         await writable.abort?.().catch(() => {});
         await o.fileHandle.remove?.().catch(() => {});
@@ -285,9 +397,9 @@ export class VideoExportJob {
     }
 
     this.state = 'done';
-    input.dispose();
-    renderer.dispose();
+    this.#tidy(input, renderer);
     const elapsed = (performance.now() - startWall) / 1000;
+    const summary = { frames: this.frames, elapsed, warnings: this.warnings, partial, rendered: this.renderedEnd };
     if (streaming) {
       try {
         await writable.close();
@@ -295,11 +407,11 @@ export class VideoExportJob {
         /* already closed by the target */
       }
       const f = await o.fileHandle.getFile().catch(() => null);
-      return { streamed: true, name: o.fileHandle.name, bytes: f?.size ?? 0, frames: this.frames, elapsed, warnings: this.warnings };
+      return { ...summary, streamed: true, name: o.fileHandle.name, bytes: f?.size ?? 0 };
     }
     const mime = CONTAINERS[o.container]?.mime ?? 'video/mp4';
     const blob = new Blob([output.target.buffer], { type: mime });
-    return { blob, bytes: blob.size, frames: this.frames, elapsed, warnings: this.warnings };
+    return { ...summary, blob, bytes: blob.size };
   }
 }
 
@@ -387,6 +499,7 @@ export async function exportMotion({ source, width, height, settings, engine, pa
         await output.cancel();
         throw new ExportCancelled();
       }
+      if (i % 4 === 0) await yieldToUI();
       const eye = motionEye(path, i / total, amount, settings);
       renderer.render(fp.params(settings, geo, { layout: LAYOUT.MONO_L, eyes: [eye] }));
       await videoSource.add(i / fps, 1 / fps);

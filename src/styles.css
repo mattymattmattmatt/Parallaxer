@@ -1978,3 +1978,14 @@ kbd {
   height: 28px;
   font-size: 12px;
 }
+
+.modal-foot .confirm-msg {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #ffe2b0;
+  font-size: 12.5px;
+}
+.confirm-msg .ico {
+  color: var(--warn);
+}
