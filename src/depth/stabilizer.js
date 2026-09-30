@@ -79,7 +79,10 @@ export class DepthStabilizer {
     const span = mx - mn || 1;
     const bins = new Uint32Array(RANGE_BINS);
     const k = (RANGE_BINS - 1) / span;
-    for (let i = 0; i < n; i++) bins[((raw[i] - mn) * k) | 0]++;
+    for (let i = 0; i < n; i++) {
+      const b = ((raw[i] - mn) * k) | 0;
+      bins[b >= 0 && b < RANGE_BINS ? b : 0]++;
+    }
     const pick = (q) => {
       const target = q * n;
       let acc = 0;
@@ -112,7 +115,7 @@ export class DepthStabilizer {
       const prevLuma = this.prevLuma;
       for (let i = 0; i < n; i++) {
         let v = (raw[i] - lo) / range;
-        v = v < 0 ? 0 : v > 1 ? 1 : v;
+        v = v > 0 ? (v < 1 ? v : 1) : 0; // also maps NaN to 0
         const dd = v - prev[i];
         const dc = luma[i] - prevLuma[i];
         const wgt = keep * Math.exp(-dd * dd * invD - dc * dc * invC);
@@ -121,7 +124,7 @@ export class DepthStabilizer {
     } else {
       for (let i = 0; i < n; i++) {
         const v = (raw[i] - lo) / range;
-        out[i] = v < 0 ? 0 : v > 1 ? 1 : v;
+        out[i] = v > 0 ? (v < 1 ? v : 1) : 0;
       }
     }
 

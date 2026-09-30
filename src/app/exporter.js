@@ -264,6 +264,12 @@ export class Exporter {
           const bps = targetBitrate(q, geo.canvasW, geo.canvasH, o.fps || it.meta?.fps || 30, this.resolvedCodec);
           const est = (bps / 8) * span * 1.03 + (it.meta?.audio && o.audio !== 'none' ? 20000 * span : 0);
           spec.querySelector('[data-k="size"]')?.replaceChildren(`≈ ${formatBytes(est)} · ${(bps / 1e6).toFixed(1)} Mbps`);
+          if (est > 1.5e9 && !o.toDisk) {
+            warn.hidden = false;
+            warn.textContent = supportsDiskStreaming()
+              ? `Large output (≈ ${formatBytes(est)}). Turn on “Stream directly to disk” so the file is written as it encodes instead of being held in memory.`
+              : `Large output (≈ ${formatBytes(est)}). This browser has to hold the whole file in memory — consider a lower resolution, a half-width layout or a shorter range.`;
+          }
         }
         if (this.startBtn) this.startBtn.disabled = !this.resolvedCodec;
         if (!this.resolvedCodec) {

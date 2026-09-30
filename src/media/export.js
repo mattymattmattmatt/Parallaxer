@@ -183,6 +183,8 @@ export class VideoExportJob {
     const startWall = performance.now();
     let procTime = 0;
 
+    const frameCanvas = new OffscreenCanvas(2, 2);
+    const frameCtx = frameCanvas.getContext('2d', { alpha: false });
     const layoutLabel = LAYOUTS[s.layout]?.label ?? s.layout;
     const conversion = await Conversion.init({
       input,
@@ -203,15 +205,17 @@ export class VideoExportJob {
         process: async (sample) => {
           if (this.cancelled) throw new ExportCancelled();
           const t0 = performance.now();
-          const frame = sample.toVideoFrame();
+          // drawWithFit applies rotation, flip and pixel aspect ratio and crops coded padding in one GPU draw.
+          const fw = sample.displayWidth;
+          const fh = sample.displayHeight;
+          if (frameCanvas.width !== fw || frameCanvas.height !== fh) {
+            frameCanvas.width = fw;
+            frameCanvas.height = fh;
+          }
+          sample.drawWithFit(frameCtx, { fit: 'fill' });
           const continuous = sample.timestamp > lastTs && sample.timestamp - lastTs < 1;
           lastTs = sample.timestamp;
-          let stats;
-          try {
-            stats = await fp.ingest(frame, frame.displayWidth, frame.displayHeight, s, { continuous });
-          } finally {
-            frame.close();
-          }
+          const stats = await fp.ingest(frameCanvas, fw, fh, s, { continuous });
           fp.renderOutput(s, geo);
           const out = new VideoFrame(canvas, {
             timestamp: Math.round(sample.timestamp * 1e6),

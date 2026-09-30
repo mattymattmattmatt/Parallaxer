@@ -9,6 +9,8 @@
     <meta name="color-scheme" content="dark" />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="alternate icon" href="favicon.ico" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+    <link rel="manifest" href="manifest.webmanifest" />
   </head>
   <body>
     <div id="app" class="app" data-media="none">
@@ -57,6 +59,7 @@
           <div class="viewbar">
             <div class="seg views" id="views" role="tablist"></div>
             <div class="viewbar-right">
+              <button class="btn subtle vr" id="vrBtn" title="View the live stereo pair in a VR headset (WebXR)" hidden></button>
               <button class="icon-btn" id="compareBtn" title="Hold to compare with original (\)"></button>
               <button class="icon-btn" id="hudBtn" title="Toggle stats overlay (H)"></button>
               <button class="icon-btn" id="fsBtn" title="Fullscreen (F)"></button>

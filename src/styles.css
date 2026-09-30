@@ -371,6 +371,15 @@ button {
 .app.no-bin .bin {
   display: none;
 }
+.bin {
+  grid-column: 1;
+}
+.stage {
+  grid-column: 2;
+}
+.inspector {
+  grid-column: 3;
+}
 
 .pane-head {
   display: flex;
@@ -1873,6 +1882,10 @@ kbd {
   .workspace {
     grid-template-columns: 1fr !important;
   }
+  .stage,
+  .inspector {
+    grid-column: 1;
+  }
   .stage {
     min-height: 70vh;
   }
@@ -1888,7 +1901,9 @@ kbd {
   .engine,
   .divider,
   #undoBtn,
-  #redoBtn {
+  #redoBtn,
+  #helpBtn,
+  .brand-name {
     display: none;
   }
   .topbar {
@@ -1911,6 +1926,26 @@ kbd {
   .stats {
     grid-template-columns: 1fr 1fr;
   }
+  .app[data-media='none'] .viewer {
+    min-height: 0;
+    display: block;
+  }
+  .app[data-media='none'] .empty {
+    position: relative;
+    inset: auto;
+    padding: 28px 16px 32px;
+  }
+  .app[data-media='none'] .view-canvas,
+  .app[data-media='none'] .transport,
+  .app[data-media='none'] .timeline-host {
+    display: none;
+  }
+  .empty h1 {
+    font-size: 22px;
+  }
+  .stage {
+    min-height: 0;
+  }
 }
 
 .btn.recording {
@@ -1923,4 +1958,12 @@ kbd {
   70% {
     box-shadow: 0 0 0 8px rgba(255, 61, 110, 0);
   }
+}
+
+.btn.vr {
+  height: 28px;
+  font-size: 12px;
+  margin-right: 6px;
+  border-color: rgba(31, 216, 240, 0.35);
+  background: linear-gradient(90deg, rgba(255, 61, 110, 0.12), rgba(31, 216, 240, 0.12));
 }

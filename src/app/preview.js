@@ -122,6 +122,16 @@ export class Preview {
     this.ingest(continuous, mediaTime);
   }
 
+  /** Poll the video for a new frame (used when the page's own frame callbacks are throttled, e.g. in WebXR). */
+  pump() {
+    const src = this.source;
+    if (!src || src.el !== this.video || this.busy) return;
+    const t = this.video.currentTime;
+    if (t === this.pumpTime) return;
+    this.pumpTime = t;
+    this.#videoFrame(!this.video.paused, t);
+  }
+
   /** Re-run depth on the current frame (after model / detail changes). */
   refresh() {
     if (!this.source) return;

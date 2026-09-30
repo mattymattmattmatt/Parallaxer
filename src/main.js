@@ -10,6 +10,7 @@ import { classifyFile, probeVideo, codecName } from './media/probe.js';
 import { Preview } from './app/preview.js';
 import { buildInspector } from './app/inspector.js';
 import { Exporter } from './app/exporter.js';
+import { XRViewer, xrSupported } from './app/xr.js';
 
 // ---------------------------------------------------------------------------------------------
 // Core objects
@@ -90,6 +91,7 @@ label('#binAddBtn', 'plus');
 label('#compareBtn', 'split');
 label('#hudBtn', 'info');
 label('#fsBtn', 'fullscreen');
+label('#vrBtn', 'cube', 'View in VR');
 label('#startBtn', 'toStart');
 label('#backBtn', 'stepBack');
 label('#playBtn', 'play');
@@ -815,6 +817,7 @@ async function openSystem() {
           icon('trash'),
           'Clear model cache'
         ),
+        installPrompt ? h('button', { class: 'btn', onclick: () => (app.install(), dlg.close()) }, icon('download'), 'Install app') : null,
         h('button', { class: 'btn primary', onclick: () => dlg.close() }, 'Close')
       )
     )
@@ -984,6 +987,30 @@ window.addEventListener('beforeunload', (e) => {
 });
 
 // ---------------------------------------------------------------------------------------------
+// WebXR
+// ---------------------------------------------------------------------------------------------
+
+const xr = new XRViewer({
+  preview,
+  store,
+  onToggle: togglePlay,
+  onEnd: () => label('#vrBtn', 'cube', 'View in VR')
+});
+$('#vrBtn').addEventListener('click', async () => {
+  if (xr.active) return xr.stop();
+  if (!preview.hasSource) {
+    toast({ kind: 'info', title: 'Open a video or photo first', msg: 'The VR viewer shows the live stereo conversion on a virtual cinema screen.' });
+    return;
+  }
+  try {
+    await xr.start();
+    label('#vrBtn', 'x', 'Exit VR');
+  } catch (err) {
+    toast({ kind: 'bad', title: 'Could not start VR', msg: err?.message ?? String(err) });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------------------------
 
@@ -1001,7 +1028,33 @@ async function boot() {
   caps.push(h('span', { class: 'cap' }, '100% on-device'));
   $('#caps').replaceChildren(...caps);
   setEngineChip('idle', gpu ? 'WebGPU ready' : 'CPU mode');
+  if (await xrSupported()) $('#vrBtn').hidden = false;
   if (!hasCodecs) toast({ kind: 'warn', title: 'Limited browser', msg: 'This browser lacks WebCodecs, so video export is unavailable. Photos still work. Use Chrome, Edge or Safari 17+ for video.' });
 }
 
 boot();
+
+// Offline + installable app (production builds only; dev relies on Vite's module server).
+if (import.meta.env.PROD && 'serviceWorker' in navigator && window.isSecureContext) {
+  window.addEventListener('load', () => navigator.serviceWorker.register(new URL('sw.js', document.baseURI)).catch(() => {}));
+}
+
+// Files opened through the installed app's file handler (e.g. "Open with Parallaxer").
+if ('launchQueue' in window) {
+  window.launchQueue.setConsumer(async (params) => {
+    const files = await Promise.all((params.files ?? []).map((h) => h.getFile()));
+    if (files.length) addFiles(files);
+  });
+}
+
+let installPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  installPrompt = e;
+});
+app.install = async () => {
+  if (!installPrompt) return false;
+  installPrompt.prompt();
+  installPrompt = null;
+  return true;
+};

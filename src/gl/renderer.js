@@ -433,6 +433,18 @@ export class StereoRenderer {
     this.#draw(null, o.canvasW, o.canvasH);
   }
 
+  /** Render both eye views (no compose). Returns the eye targets for callers that present them themselves (WebXR). */
+  renderEyes(o) {
+    if (!this.hasSource || this.gl.isContextLost()) return null;
+    if (!this.hasDepth) this.uploadDepth(new Float32Array([0.5]), 1, 1);
+    const { eyeW, eyeH, logicalW, logicalH } = o;
+    const depthT = this.#refine(eyeW, eyeH, logicalW, logicalH, o.refine);
+    const [eL, eR] = o.eyes;
+    const L = this.#warp('eyeL', eL, depthT, eyeW, eyeH, logicalW, logicalH, o.stereo);
+    const R = this.#warp('eyeR', eR, depthT, eyeW, eyeH, logicalW, logicalH, o.stereo);
+    return { L, R };
+  }
+
   dispose() {
     const ext = this.gl.getExtension('WEBGL_lose_context');
     ext?.loseContext();
