@@ -18,6 +18,7 @@ import {
   exportMotion
 } from '../media/export.js';
 import { DepthWorkerPool, AutoTuner, poolSupported, workerCeiling, workerFootprintMB, MAX_WORKERS } from '../depth/pool.js';
+import { STAGES, bottleneck, statsReport } from '../media/perf.js';
 
 const OPTS_KEY = 'parallaxer.export.v1';
 const DEFAULT_OPTS = {
@@ -107,6 +108,109 @@ function download(blob, name) {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
   return url;
+}
+
+// ---------- Advanced stats ----------
+
+const ADV_KEY = 'parallaxer.advstats.open';
+function advOpen() {
+  try {
+    return localStorage.getItem(ADV_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+function setAdvOpen(open) {
+  try {
+    localStorage.setItem(ADV_KEY, open ? '1' : '0');
+  } catch {
+    /* storage unavailable: the panel just starts closed next time */
+  }
+}
+
+const fmt = (v, d = 1) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : v.toFixed(d));
+const hwLabel = (v) => (v === true ? 'GPU (hardware)' : v === false ? 'CPU (software)' : 'checking…');
+
+/**
+ * Collapsible per-stage timing panel for pro users: where each frame's time goes, the bottleneck in plain
+ * words, and a copyable report. Closed by default; remembers being opened.
+ */
+function advancedStats({ live }) {
+  let snap = null;
+  const segs = {};
+  const rows = {};
+  for (const st of STAGES) {
+    segs[st.key] = h('span', { class: `tseg s-${st.key}` });
+    const v = h('span', { class: 'tv' }, '—');
+    const p = h('span', { class: 'tp' }, '');
+    const em = h('em', { hidden: !st.wait || null }, 'wait');
+    const row = h('div', { class: 'trow', title: st.desc }, h('i', { class: `tsw s-${st.key}` }), h('span', { class: 'tl' }, st.label, em), v, p);
+    rows[st.key] = { row, v, p, em };
+  }
+  const bar = h('div', { class: 'tbar', role: 'img', 'aria-label': 'Share of each frame’s time per stage' }, STAGES.map((st) => segs[st.key]));
+  const table = h('div', { class: 'ttable' }, STAGES.map((st) => rows[st.key].row));
+  const verdictEl = h('div', { class: 'tverdict' });
+  const kv = h('dl', { class: 'spec tkv' });
+  const note = h('span', { class: 'adv-note' }, '');
+  const copyBtn = h('button', { class: 'btn adv-copy', title: 'Copy a text report of these numbers' }, icon('copy'), 'Copy stats');
+  const empty = h('div', { class: 'ctl-hint' }, 'Collecting timings — numbers appear after the first second of rendering.');
+  const content = h('div', { class: 'adv-content', hidden: true }, bar, h('div', { class: 'adv-grid' }, table, h('div', {}, verdictEl, kv)), h('div', { class: 'adv-foot' }, note, copyBtn));
+  const el = h(
+    'details',
+    { class: 'adv', open: advOpen() || null, ontoggle: () => setAdvOpen(el.open) },
+    h('summary', {}, icon('chevron', 'adv-chev'), h('span', {}, 'Advanced stats'), h('span', { class: 'adv-hint' }, 'where each frame’s time goes')),
+    h('div', { class: 'adv-body' }, empty, content)
+  );
+
+  copyBtn.onclick = async () => {
+    const text = statsReport(snap, bottleneck(snap));
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      copyBtn.replaceChildren(icon('check'), 'Copied');
+    } catch {
+      // Clipboard blocked: show the report so it can be selected by hand.
+      content.append(h('textarea', { class: 'adv-report', readonly: true, rows: 12 }, text));
+      copyBtn.replaceChildren(icon('alert'), 'Select the text below');
+    }
+    setTimeout(() => copyBtn.replaceChildren(icon('copy'), 'Copy stats'), 2000);
+  };
+
+  const update = (next) => {
+    snap = next;
+    if (!snap) return;
+    empty.hidden = true;
+    content.hidden = false;
+    const v = bottleneck(snap);
+    for (const st of snap.stages) {
+      const seg = segs[st.key];
+      seg.style.flexGrow = String(st.share);
+      seg.hidden = st.share < 0.005;
+      seg.title = `${st.label}: ${fmt(st.ms)} ms/frame (${Math.round(st.share * 100)}%) — ${st.desc}`;
+      rows[st.key].v.textContent = `${fmt(st.ms)} ms`;
+      rows[st.key].p.textContent = `${Math.round(st.share * 100)}%`;
+      rows[st.key].row.classList.toggle('top', v?.key === st.key);
+      rows[st.key].row.title = st.desc;
+      rows[st.key].em.hidden = !st.wait;
+    }
+    verdictEl.className = `tverdict ${v.key === 'balanced' ? 'ok' : ''}`;
+    verdictEl.replaceChildren(h('b', {}, v.key === 'balanced' ? 'Balanced pipeline' : `Bottleneck: ${v.title}`), h('span', {}, v.text));
+    const i = snap.info;
+    const pairs = [
+      ['Throughput', `${fmt(snap.fps)} fps · ${fmt(snap.msPerFrame)} ms/frame`],
+      ['Depth model', [i.model, i.modelInput].filter(Boolean).join(' · ') || '—'],
+      ['Depth runs on', [i.backend, i.processing].filter(Boolean).join(' · ') || '—'],
+      ['Depth inference', snap.depthMs === null ? '—' : `${fmt(snap.depthMs)} ms/frame${i.workers ? ' per worker' : ''}`],
+      ['GPU render', snap.gpuRenderMs === null ? 'not exposed by this browser' : `${fmt(snap.gpuRenderMs)} ms/frame`],
+      ['Readback latency', `${fmt(snap.readbackMs)} ms (GPU → depth input)`],
+      ['Frames in flight', fmt(snap.inflight)],
+      ['Encoder', `${i.codecName ?? '—'} · ${hwLabel(i.encoderHw)}${i.streaming ? ' · to disk' : ''}`],
+      ['Decoder', `${i.sourceCodec ?? '—'} · ${hwLabel(i.decoderHw)}`]
+    ];
+    kv.replaceChildren(...pairs.flatMap(([k, val]) => [h('dt', {}, k), h('dd', {}, val)]));
+    note.textContent = live ? 'Live · last few seconds' : `Whole export · ${snap.frames.toLocaleString()} frames`;
+  };
+  return { el, update };
 }
 
 /** How depth was processed, for the summary: '2 background workers (auto-tuned, tried 3)'. */
@@ -496,6 +600,7 @@ export class Exporter {
     const subtitle = h('div', { class: 'ctl-hint' }, '');
     const workersEl = h('div', { class: 'workers', hidden: true });
     const noticeEl = h('div', { class: 'pnotice', hidden: true });
+    const adv = advancedStats({ live: true });
     const pauseBtn = h('button', { class: 'btn' }, 'Pause');
     const stopBtn = h('button', { class: 'btn', title: 'End the export here and save everything rendered so far as a playable file' }, icon('save'), 'Stop & save');
     const cancelBtn = h('button', { class: 'btn danger' }, 'Cancel');
@@ -505,7 +610,7 @@ export class Exporter {
     const foot = h('div', { class: 'modal-foot' }, note, actions);
     this.dlg.replaceChildren(
       h('div', { class: 'modal-head' }, h('h2', {}, title), h('span')),
-      h('div', { class: 'modal-body' }, h('div', { class: 'progress-view' }, subtitle, canvas, h('div', { class: 'bar' }, bar), h('div', { class: 'stats' }, sProg.el, sFrames.el, sSpeed.el, sEta.el), workersEl, noticeEl)),
+      h('div', { class: 'modal-body' }, h('div', { class: 'progress-view' }, subtitle, canvas, h('div', { class: 'bar' }, bar), h('div', { class: 'stats' }, sProg.el, sFrames.el, sSpeed.el, sEta.el), workersEl, noticeEl, adv.el)),
       foot
     );
     const ctx = canvas.getContext('2d');
@@ -535,6 +640,8 @@ export class Exporter {
           )
         );
       },
+      /** Advanced stats snapshot (perf.js), about once a second. */
+      stats: (snap) => adv.update(snap),
       /** One-line, plain-language status (tone: info | ok | warn). */
       notice(text, tone = 'info') {
         noticeEl.hidden = !text;
@@ -598,7 +705,13 @@ export class Exporter {
     };
   }
 
-  doneView({ title, lines, files = [], warnings = [] }) {
+  doneView({ title, lines, files = [], warnings = [], stats = null }) {
+    let advEl = null;
+    if (stats) {
+      const adv = advancedStats({ live: false });
+      adv.update(stats);
+      advEl = h('div', { style: { marginTop: '14px' } }, adv.el);
+    }
     this.dlg.replaceChildren(
       h('div', { class: 'modal-head' }, h('h2', {}, title), h('button', { class: 'icon-btn', title: 'Close', onclick: () => this.close() }, icon('x'))),
       h(
@@ -613,7 +726,8 @@ export class Exporter {
               files.map((f) => h('button', { class: 'btn', onclick: () => download(f.blob, f.name) }, icon('download'), f.name))
             )
           : null,
-        warnings.length ? h('div', { class: 'warnbox', style: { marginTop: '14px' } }, warnings.join(' ')) : null
+        warnings.length ? h('div', { class: 'warnbox', style: { marginTop: '14px' } }, warnings.join(' ')) : null,
+        advEl
       ),
       h('div', { class: 'modal-foot' }, h('span', { class: 'note' }, ''), h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: () => this.renderConfig() }, 'Export again'), h('button', { class: 'btn primary', onclick: () => this.close() }, 'Done')))
     );
@@ -711,6 +825,9 @@ export class Exporter {
           fileHandle: handle,
           pool,
           tuner,
+          workerCap: pool ? this.speedLimits().cap : null,
+          modelName: this.app.currentModel()?.name ?? null,
+          onStats: (snap) => ui.stats(snap),
           onNotice: (text, tone) => ui.notice(text, tone),
           onFrame: ({ canvas }) => {
             ui.paint(canvas);
@@ -809,7 +926,8 @@ export class Exporter {
           ['Processing', processingLine(pool, tuner, peakWorkers)]
         ],
         files: results.filter((r) => r.blob).map((r) => ({ blob: r.blob, name: r.name })),
-        warnings
+        warnings,
+        stats: results.findLast((r) => r.stats)?.stats ?? null
       });
       this.app.toast({ kind: 'ok', title: stopEarly ? 'Partial export saved' : 'Export complete', msg: `${results.length} file${results.length > 1 ? 's' : ''} · ${formatBytes(bytes)}` });
     } catch (err) {

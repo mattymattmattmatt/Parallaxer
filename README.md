@@ -46,6 +46,13 @@ The progress view shows each worker's state and speed, plus a plain-language sta
 start or crashes, its frames move to another worker. If none are left, the export carries on in the page and
 still completes.
 
+**Advanced stats** (collapsed by default, in the progress and summary views) breaks every frame's time into
+stages: decode, prepare, depth, stabilise, render, encode, preview/UI and other. The stages add up to the
+real wall time, so the largest one is the bottleneck. The panel names that bottleneck with a suggested fix and
+shows depth inference time, GPU render time (where the browser exposes timer queries), readback latency,
+frames in flight, and whether the encoder and decoder have hardware support. *Copy stats* puts a text
+report on the clipboard.
+
 ### Keyboard
 
 | Keys | Action |

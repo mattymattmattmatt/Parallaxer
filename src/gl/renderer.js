@@ -495,6 +495,50 @@ export class StereoRenderer {
     return { L, R };
   }
 
+  // ---------- GPU timing (Advanced stats) ----------
+
+  /**
+   * Start timing GPU work with EXT_disjoint_timer_query_webgl2. Returns false when the browser doesn't expose
+   * it (many don't), in which case endGpuTimer() is a no-op. Only one timer may be open at a time.
+   */
+  beginGpuTimer() {
+    const gl = this.gl;
+    if (this.timerExt === undefined) this.timerExt = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+    if (!this.timerExt || this.timerOpen) return false;
+    try {
+      const q = gl.createQuery();
+      gl.beginQuery(this.timerExt.TIME_ELAPSED_EXT, q);
+      this.timerOpen = q;
+      return true;
+    } catch {
+      this.timerExt = null;
+      return false;
+    }
+  }
+
+  endGpuTimer() {
+    const gl = this.gl;
+    if (!this.timerOpen) return;
+    gl.endQuery(this.timerExt.TIME_ELAPSED_EXT);
+    (this.timerQueries ??= []).push(this.timerOpen);
+    this.timerOpen = null;
+  }
+
+  /** Completed GPU timings in ms since the last call (results arrive a few frames late). */
+  takeGpuTimings() {
+    const gl = this.gl;
+    const out = [];
+    const qs = this.timerQueries ?? [];
+    while (qs.length && gl.getQueryParameter(qs[0], gl.QUERY_RESULT_AVAILABLE)) {
+      const q = qs.shift();
+      const disjoint = gl.getParameter(this.timerExt.GPU_DISJOINT_EXT);
+      if (!disjoint) out.push(gl.getQueryParameter(q, gl.QUERY_RESULT) / 1e6);
+      gl.deleteQuery(q);
+    }
+    while (qs.length > 16) gl.deleteQuery(qs.shift());
+    return out;
+  }
+
   dispose() {
     const ext = this.gl.getExtension('WEBGL_lose_context');
     ext?.loseContext();
