@@ -22,6 +22,7 @@ import { FrameProcessor } from '../core/pipeline.js';
 import { LAYOUTS, layoutGeometry } from '../core/settings.js';
 import { prepareFrame } from '../depth/stabilizer.js';
 import { PoolExhausted } from '../depth/pool.js';
+import { ExportProfiler, browserName } from './perf.js';
 
 export const CONTAINERS = {
   mp4: { label: 'MP4', ext: 'mp4', mime: 'video/mp4', codecs: ['avc', 'hevc', 'av1', 'vp9'] },
@@ -159,7 +160,8 @@ const MAX_IN_FLIGHT = 12;
  * is the same as a one-frame-at-a-time export. Original audio is copied in lockstep behind the video.
  *
  * Options: { file, engine, settings, eyeW, eyeH, container, codec, quality, frameRate, sourceFps, audio, trim,
- *            fileHandle, pool?, tuner?, onFrame, onProgress, onState, onNotice }
+ *            fileHandle, pool?, tuner?, workerCap?, modelName?, onFrame, onProgress, onState, onNotice, onStats }
+ * onStats receives a profiler snapshot about once a second (see perf.js); the result carries the final one.
  */
 export class VideoExportJob {
   constructor(opts) {
@@ -220,6 +222,7 @@ export class VideoExportJob {
       const t0 = performance.now();
       await new Promise((r) => (this.resumeResolve = r));
       this.pausedMs += performance.now() - t0;
+      this.prof?.paused(performance.now() - t0);
       if (this.cancelled) throw new ExportCancelled();
       if (this.stopRequested) return false;
       this.state = 'running';
@@ -241,7 +244,11 @@ export class VideoExportJob {
       }
     }
     const res = await o.engine.infer(rgba, size.w, size.h);
-    return { ...res, ...prepareFrame(res.data, res.w, res.h, rgba, size.w, size.h) };
+    const t0 = performance.now();
+    const prepared = prepareFrame(res.data, res.w, res.h, rgba, size.w, size.h);
+    // On the CPU the model (and this prep) run on the page thread and block everything else meanwhile.
+    if (o.engine.backend === 'wasm') this.prof?.pageDepthBlock(res.ms + performance.now() - t0);
+    return { ...res, ...prepared };
   }
 
   async run() {
@@ -345,6 +352,35 @@ export class VideoExportJob {
       output.setMetadataTags(tags);
       await output.start();
 
+      const prof = (this.prof = new ExportProfiler());
+      const codecName = VIDEO_CODECS[o.codec] ?? o.codec;
+      Object.assign(prof.info, {
+        sourceCodec: VIDEO_CODECS[videoTrack.codec] ?? videoTrack.codec ?? null,
+        output: `${geo.canvasW}×${geo.canvasH}`,
+        codecName,
+        streaming,
+        model: o.modelName ?? null,
+        workersMax: o.workerCap ?? null,
+        browser: browserName()
+      });
+      // Whether the GPU's video engines can take this job; answered in the background, shown when known.
+      canEncodeVideo(o.codec, { width: geo.canvasW, height: geo.canvasH, hardwareAcceleration: 'prefer-hardware' })
+        .then((ok) => (prof.info.encoderHw = !!ok))
+        .catch(() => {});
+      videoTrack
+        .getDecoderConfig()
+        .then((cfg) => cfg && VideoDecoder.isConfigSupported({ ...cfg, hardwareAcceleration: 'prefer-hardware' }))
+        .then((r) => r && (prof.info.decoderHw = !!r.supported))
+        .catch(() => {});
+      let lastStats = 0;
+      const describeProcessing = () => {
+        const n = o.pool && !this.poolDown ? o.pool.ready.length : 0;
+        prof.info.workers = n;
+        prof.info.processing = n ? `${n} background worker${n > 1 ? 's' : ''}` : 'in page';
+        const backends = n ? [...new Set(o.pool.ready.map((w) => w.backend))] : [o.engine.backend];
+        prof.info.backend = backends.map((b) => (b === 'webgpu' ? 'WebGPU' : b === 'wasm' ? 'CPU (WASM)' : b)).join(' + ');
+      };
+
       const sink = new VideoSampleSink(videoTrack);
       const samples = fpsOut ? sink.samplesAtTimestamps(frameTimes(start, end, fpsOut)) : sink.samples(start, end);
       const frameCanvas = new OffscreenCanvas(2, 2);
@@ -356,30 +392,40 @@ export class VideoExportJob {
       };
 
       const emit = async (item) => {
+        prof.sample('inflight', queue.length + 1);
         let res;
         try {
-          res = await item.depthP;
+          res = await prof.time('depth', item.depthP);
         } finally {
           if (this.cancelled) item.bitmap.close();
         }
         if (this.cancelled) throw new ExportCancelled();
+        prof.sample('depthMs', res.ms);
+        const t0 = performance.now();
         renderer.stage(item.bitmap, item.fw, item.fh);
         const continuous = this.lastTs !== null && item.ts > this.lastTs && item.ts - this.lastTs < 1;
         const stats = fp.finish(res, item.size, s, { continuous });
         item.bitmap.close();
+        const timed = renderer.beginGpuTimer();
         fp.renderOutput(s, geo);
+        if (timed) renderer.endGpuTimer();
         const sample = new VideoSample(
           new VideoFrame(canvas, { timestamp: Math.round(item.ts * 1e6), duration: Math.max(1, Math.round(item.dur * 1e6)) })
         );
+        prof.add('stabilise', fp.stabiliseMs);
+        prof.add('render', performance.now() - t0 - fp.stabiliseMs);
+        for (const ms of renderer.takeGpuTimings?.() ?? []) prof.sample('gpuRenderMs', ms);
         try {
-          await videoSource.add(sample);
+          await prof.time('encode', videoSource.add(sample));
         } finally {
           sample.close();
         }
+        prof.frameDone();
         this.frames++;
         this.lastTs = item.ts;
         this.renderedEnd = item.ts + item.dur;
         advanceAudio(item.ts);
+        const tUi = performance.now();
         o.onFrame?.({ canvas, frames: this.frames, stats, timestamp: item.ts });
         o.tuner?.frame();
         const elapsed = (performance.now() - startWall) / 1000;
@@ -393,69 +439,96 @@ export class VideoExportJob {
           fps: this.frames / active,
           eta: progress > 0.01 ? (active / progress) * (1 - progress) : null
         });
+        const now = performance.now();
+        if (o.onStats && now - lastStats > 1000) {
+          lastStats = now;
+          describeProcessing();
+          o.onStats(prof.snapshot());
+        }
+        prof.add('ui', performance.now() - tUi);
       };
 
       this.state = 'running';
       let k = 0;
+      describeProcessing();
+      prof.start();
+      let tWait = performance.now();
       for await (const sample of samples) {
-        if (!sample) {
-          k++;
-          continue;
-        }
-        let ts;
-        let dur;
-        if (fpsOut) {
-          ts = k / fpsOut;
-          dur = 1 / fpsOut;
-          k++;
-        } else {
-          const a = Math.max(start, sample.timestamp);
-          const b = Math.min(end, sample.timestamp + sample.duration);
-          if (b <= a) {
-            sample.close();
+        prof.add('decode', performance.now() - tWait);
+        try {
+          if (!sample) {
+            k++;
             continue;
           }
-          ts = a - start;
-          dur = b - a;
-        }
-        let go;
-        try {
-          go = await this.#gate();
-        } catch (err) {
+          let ts;
+          let dur;
+          if (fpsOut) {
+            ts = k / fpsOut;
+            dur = 1 / fpsOut;
+            k++;
+          } else {
+            const a = Math.max(start, sample.timestamp);
+            const b = Math.min(end, sample.timestamp + sample.duration);
+            if (b <= a) {
+              sample.close();
+              continue;
+            }
+            ts = a - start;
+            dur = b - a;
+          }
+          let go;
+          try {
+            go = await this.#gate();
+          } catch (err) {
+            sample.close();
+            throw err;
+          }
+          if (!go) {
+            sample.close();
+            break;
+          }
+          // drawWithFit applies rotation, flip and pixel aspect ratio and crops coded padding in one GPU draw.
+          const tPrep = performance.now();
+          const fw = sample.displayWidth;
+          const fh = sample.displayHeight;
+          if (frameCanvas.width !== fw || frameCanvas.height !== fh) {
+            frameCanvas.width = fw;
+            frameCanvas.height = fh;
+          }
+          sample.drawWithFit(frameCtx, { fit: 'fill' });
           sample.close();
-          throw err;
+          const bitmap = frameCanvas.transferToImageBitmap();
+          const size = o.engine.inputSize(fw, fh, s.detail);
+          if (!this.frames && !queue.length) {
+            const perFrame = fw * fh * 4 + size.w * size.h * 16;
+            memCap = Math.max(2, Math.min(MAX_IN_FLIGHT, Math.floor(IN_FLIGHT_BUDGET_BYTES / perFrame)));
+          }
+          if (!prof.info.source) {
+            prof.info.source = `${fw}×${fh}${o.sourceFps ? ` @ ${+o.sourceFps.toFixed(3)} fps` : ''}`;
+            prof.info.modelInput = `${size.w}×${size.h}`;
+          }
+          renderer.stage(bitmap, fw, fh);
+          const tRead = performance.now();
+          const depthP = renderer.readModelInputAsync(size.w, size.h).then((rgba) => {
+            prof.sample('readbackMs', performance.now() - tRead);
+            return this.#depth(rgba, size);
+          });
+          depthP.catch(() => {}); // surfaced when the frame is emitted
+          queue.push({ bitmap, fw, fh, ts, dur, size, depthP });
+          prof.add('prepare', performance.now() - tPrep);
+          while (queue.length >= capacity()) await emit(queue.shift());
+          await yieldToUI();
+        } finally {
+          tWait = performance.now();
         }
-        if (!go) {
-          sample.close();
-          break;
-        }
-        // drawWithFit applies rotation, flip and pixel aspect ratio and crops coded padding in one GPU draw.
-        const fw = sample.displayWidth;
-        const fh = sample.displayHeight;
-        if (frameCanvas.width !== fw || frameCanvas.height !== fh) {
-          frameCanvas.width = fw;
-          frameCanvas.height = fh;
-        }
-        sample.drawWithFit(frameCtx, { fit: 'fill' });
-        sample.close();
-        const bitmap = frameCanvas.transferToImageBitmap();
-        const size = o.engine.inputSize(fw, fh, s.detail);
-        if (!this.frames && !queue.length) {
-          const perFrame = fw * fh * 4 + size.w * size.h * 16;
-          memCap = Math.max(2, Math.min(MAX_IN_FLIGHT, Math.floor(IN_FLIGHT_BUDGET_BYTES / perFrame)));
-        }
-        renderer.stage(bitmap, fw, fh);
-        const depthP = renderer.readModelInputAsync(size.w, size.h).then((rgba) => this.#depth(rgba, size));
-        depthP.catch(() => {}); // surfaced when the frame is emitted
-        queue.push({ bitmap, fw, fh, ts, dur, size, depthP });
-        while (queue.length >= capacity()) await emit(queue.shift());
-        await yieldToUI();
       }
       // Finish every frame that is already in flight (also on Stop & save: that work is already paid for).
       while (queue.length) {
         if (this.cancelled) throw new ExportCancelled();
         await emit(queue.shift());
       }
+      describeProcessing();
+      const finalStats = prof.snapshot({ recent: false });
 
       const partial = this.stopRequested;
       if (partial) {
@@ -473,7 +546,7 @@ export class VideoExportJob {
       this.state = 'done';
       tidy();
       const elapsed = (performance.now() - startWall) / 1000;
-      const summary = { frames: this.frames, elapsed, warnings: this.warnings, partial, rendered: this.renderedEnd };
+      const summary = { frames: this.frames, elapsed, warnings: this.warnings, partial, rendered: this.renderedEnd, stats: finalStats };
       if (streaming) {
         try {
           await writable.close();

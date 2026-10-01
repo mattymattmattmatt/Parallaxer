@@ -52,6 +52,7 @@ export class FrameProcessor {
   finish(res, size, s, { continuous = false } = {}) {
     const r = this.renderer;
     const prepared = res.luma ? { luma: res.luma, pLo: res.pLo, pHi: res.pHi } : null;
+    const t0 = performance.now();
     const st = this.stabilizer.process(
       res.data,
       res.w,
@@ -62,6 +63,7 @@ export class FrameProcessor {
       { temporal: s.temporal, cutSensitivity: s.cutSensitivity, continuous },
       prepared
     );
+    this.stabiliseMs = performance.now() - t0;
     r.uploadDepth(st.depth, st.w, st.h);
     r.commit();
     this.autoConv.push(st.subject, st.cut || !continuous);
