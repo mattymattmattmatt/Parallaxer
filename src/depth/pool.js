@@ -63,6 +63,7 @@ export class DepthWorkerPool {
    *   backend        'auto' | 'webgpu' | 'wasm' (same preference as the page engine)
    *   expectBackend  backend the page engine actually got; workers must match it
    *   threads        WebAssembly threads per worker (only matters when cross-origin isolated)
+   *   fixed          { w, h, dims }: pin each worker's session to the export's input size (see DepthEngine.load)
    *   onChange       called whenever worker state or stats change
    */
   constructor(o) {
@@ -88,6 +89,8 @@ export class DepthWorkerPool {
       label: `W${w.idx}`,
       state: w.state,
       backend: w.backend,
+      precision: w.precision,
+      mode: w.mode,
       frames: w.frames,
       ms: w.ms,
       inflight: w.inflight,
@@ -104,7 +107,7 @@ export class DepthWorkerPool {
     if (this.disposed) return Promise.resolve(null);
     const idx = ++this.count;
     const worker = new Worker(new URL('./depth-worker.js', import.meta.url), { type: 'module', name: `parallaxer-depth-${idx}` });
-    const w = { idx, worker, state: 'starting', backend: null, inflight: 0, frames: 0, ms: 0, error: null };
+    const w = { idx, worker, state: 'starting', backend: null, precision: null, mode: null, inflight: 0, frames: 0, ms: 0, error: null };
     this.workers.push(w);
     this.#changed();
     return new Promise((resolve) => {
@@ -118,7 +121,10 @@ export class DepthWorkerPool {
       worker.onmessageerror = () => this.#fail(w, 'could not exchange data with the worker');
       const bytes = typeof this.o.model === 'object' ? this.o.model.bytes?.slice() : null;
       const model = typeof this.o.model === 'object' ? { ...this.o.model, bytes } : this.o.model;
-      worker.postMessage({ type: 'init', model, backend: this.o.backend, base: document.baseURI, threads: this.o.threads }, bytes ? [bytes.buffer] : []);
+      worker.postMessage(
+        { type: 'init', model, backend: this.o.backend, base: document.baseURI, threads: this.o.threads, fixed: this.o.fixed ?? null },
+        bytes ? [bytes.buffer] : []
+      );
     });
   }
 
@@ -131,6 +137,8 @@ export class DepthWorkerPool {
       }
       w.state = 'ready';
       w.backend = m.backend;
+      w.precision = m.precision;
+      w.mode = m.mode;
       w.onInit?.(w);
       w.onInit = null;
       this.#flushWaiting();
@@ -141,6 +149,7 @@ export class DepthWorkerPool {
       const job = this.jobs.get(m.id);
       w.inflight = Math.max(0, w.inflight - 1);
       w.frames++;
+      if (m.mode) w.mode = m.mode;
       w.ms = w.ms ? w.ms * 0.8 + m.ms * 0.2 : m.ms;
       if (job) {
         this.jobs.delete(m.id);
@@ -282,6 +291,14 @@ export class AutoTuner {
     this.stamp = [];
     this.sinceChange = 0;
     this.settled = false;
+    this.history = [];
+  }
+
+  /** What Auto measured so far, for Advanced stats: '1×: 3.1 fps → 2×: 3.3 fps · kept 1'. */
+  summary() {
+    const steps = this.history.map((h) => `${h.workers}×: ${h.fps.toFixed(1)} fps`).join(' → ');
+    if (this.settled) return `${steps}${steps ? ' · ' : ''}kept ${this.best?.workers ?? this.pool.ready.length}`;
+    return steps ? `${steps} · measuring…` : 'measuring…';
   }
 
   /** The export paused or moved to the next file: throw away the current measurement, it would read low. */
@@ -309,6 +326,7 @@ export class AutoTuner {
     if (span < 3000 || this.stamp.length < 24) return;
     const fps = ((this.stamp.length - 1) * 1000) / span;
     const n = this.pool.ready.length;
+    this.history.push({ workers: n, fps });
     const workers = (k) => `${k} worker${k > 1 ? 's' : ''}`;
     if (this.best === null || fps > this.best.fps * 1.1) {
       const gain = this.best ? ` (+${Math.round((fps / this.best.fps - 1) * 100)}%)` : '';

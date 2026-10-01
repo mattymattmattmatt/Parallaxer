@@ -42,6 +42,9 @@ session). Frames are always finished strictly in order, so the file is the same 
 - **Standard** runs depth in the page. It is the lowest-memory option.
 - **2× / 3× / 4×** start that many workers right away. Counts above the machine's safe limit are disabled.
 
+Each worker pins its model session to the export's frame size, so ONNX Runtime can precompute all shape
+logic once; a worker re-pins itself if a batch moves to a different size.
+
 The progress view shows each worker's state and speed, plus a plain-language status line. If a worker can't
 start or crashes, its frames move to another worker. If none are left, the export carries on in the page and
 still completes.
@@ -50,8 +53,8 @@ still completes.
 stages: decode, prepare, depth, stabilise, render, encode, preview/UI and other. The stages add up to the
 real wall time, so the largest one is the bottleneck. The panel names that bottleneck with a suggested fix and
 shows depth inference time, GPU render time (where the browser exposes timer queries), readback latency,
-frames in flight, and whether the encoder and decoder have hardware support. *Copy stats* puts a text
-report on the clipboard.
+frames in flight, what Auto measured for each worker count, and whether the encoder and decoder have hardware
+support. *Copy stats* puts a text report on the clipboard.
 
 ### Keyboard
 

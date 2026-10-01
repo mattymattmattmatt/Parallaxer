@@ -112,6 +112,8 @@ function download(blob, name) {
 
 // ---------- Advanced stats ----------
 
+const MODE_LABEL = { static: 'fixed input size' };
+
 const ADV_KEY = 'parallaxer.advstats.open';
 function advOpen() {
   try {
@@ -204,6 +206,7 @@ function advancedStats({ live }) {
       ['GPU render', snap.gpuRenderMs === null ? 'not exposed by this browser' : `${fmt(snap.gpuRenderMs)} ms/frame`],
       ['Readback latency', `${fmt(snap.readbackMs)} ms (GPU → depth input)`],
       ['Frames in flight', fmt(snap.inflight)],
+      ...(i.tuning ? [['Auto tuning', i.tuning]] : []),
       ['Encoder', `${i.codecName ?? '—'} · ${hwLabel(i.encoderHw)}${i.streaming ? ' · to disk' : ''}`],
       ['Decoder', `${i.sourceCodec ?? '—'} · ${hwLabel(i.decoderHw)}`]
     ];
@@ -631,7 +634,12 @@ export class Exporter {
           ...shown.map((w) =>
             h(
               'span',
-              { class: `wchip ${w.state}`, title: w.error ? `Stopped: ${w.error}` : `${w.frames} frames${w.backend ? ` on ${w.backend === 'webgpu' ? 'the GPU' : 'the CPU'}` : ''}` },
+              {
+                class: `wchip ${w.state}`,
+                title: w.error
+                  ? `Stopped: ${w.error}`
+                  : `${w.frames} frames${w.backend ? ` on ${w.backend === 'webgpu' ? 'the GPU' : 'the CPU'}` : ''}${MODE_LABEL[w.mode] ? ` · ${MODE_LABEL[w.mode]}` : ''}`
+              },
               h('i', { class: 'wdot' }),
               h('b', {}, w.label),
               w.state === 'ready' && w.ms ? `${w.ms.toFixed(0)} ms/frame` : label[w.state] ?? w.state,
@@ -964,11 +972,17 @@ export class Exporter {
     const { cap, model } = this.speedLimits();
     const target = auto ? 1 : Math.max(1, Math.min(Number(o.workers) || 1, cap));
     const cores = navigator.hardwareConcurrency || 4;
+    // Pin worker sessions to the first video's model-input size so ONNX Runtime can precompute every shape. Other
+    // sizes (batch) still work: a worker re-pins itself when the size changes.
+    const firstVideo = this.items.find((i) => i.kind === 'video' && i.meta);
+    const dims = this.app.engine.session?.inputMetadata?.[0]?.shape;
+    const size = firstVideo ? this.app.engine.inputSize(firstVideo.meta.width, firstVideo.meta.height, this.store.state.detail) : null;
     const pool = new DepthWorkerPool({
       model: model.bytes ? model : model.id,
       backend: this.store.state.backend,
       expectBackend: this.app.engine.backend,
       threads: Math.max(1, Math.floor((cores - 1) / (auto ? cap : target))),
+      fixed: size && dims ? { w: size.w, h: size.h, dims: [...dims] } : null,
       onChange: (list) => ui.workers(list)
     });
     this.startingPool = pool;
