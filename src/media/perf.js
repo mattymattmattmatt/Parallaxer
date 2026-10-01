@@ -172,8 +172,13 @@ export function bottleneck(snap) {
           text: `${share} goes into running the depth model on the page thread, which blocks everything else meanwhile. Processing speed Auto or 2× moves it to background workers; a lower Detail setting or a smaller model also helps.`
         };
       }
-      const more = i.workersMax && (i.workers ?? 0) < i.workersMax ? 'More workers (Processing speed), a ' : 'A ';
-      return { key: 'depth', title: 'Depth model', text: `${share} of the time is spent waiting for depth. ${more}lower Detail setting or a smaller model will speed this up.` };
+      const tips = [];
+      if (i.workersMax && (i.workers ?? 0) < i.workersMax) tips.push('more workers (Processing speed)');
+      const short = Math.min(...String(i.modelInput ?? '').split('×').map(Number).filter((v) => v > 0));
+      const fewer = Number.isFinite(short) && short > 392 ? Math.round((1 - (392 / short) ** 2) * 100) : 0;
+      tips.push(fewer >= 20 ? `Detail “Balanced” (${fewer}% fewer pixels for the model)` : 'a lower Detail setting');
+      tips.push(/\bBase\b/.test(i.model ?? '') ? 'Depth Anything V2 Small (a much lighter network)' : 'a smaller model');
+      return { key: 'depth', title: 'Depth model', text: `${share} of the time is spent waiting for depth. The biggest levers: ${tips.join(', ')}.` };
     }
     case 'stabilise':
       return { key: 'stabilise', title: 'Depth smoothing (CPU)', text: `${share} goes into temporal smoothing on the CPU. A lower Detail setting reduces it.` };
@@ -213,6 +218,7 @@ export function statsReport(snap, verdict) {
     `Source: ${i.source ?? '?'} (${i.sourceCodec ?? '?'}, decode ${hwWord(i.decoderHw)})`,
     `Output: ${i.output ?? '?'} ${i.codecName ?? ''} (encode ${hwWord(i.encoderHw)})${i.streaming ? ', streamed to disk' : ''}`,
     `Depth: ${i.model ?? '?'} at ${i.modelInput ?? '?'} on ${i.backend ?? '?'} · ${i.processing ?? '?'}`,
+    i.tuning ? `Auto tuning: ${i.tuning}` : '',
     `Throughput: ${f(snap.fps)} fps (${f(snap.msPerFrame)} ms/frame over ${snap.frames} frames)`,
     `Where the time goes (per frame):`,
     ...snap.stages.map((s) => `  ${s.label.padEnd(13)} ${f(s.ms).padStart(7)} ms  ${pct(s.share).padStart(4)}${s.wait ? '  (waiting)' : ''}`),

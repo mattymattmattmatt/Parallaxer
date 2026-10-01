@@ -15,8 +15,8 @@ self.onmessage = async (e) => {
       setAssetBase(m.base);
       if (m.threads) setThreadBudget(m.threads);
       const gpu = m.backend === 'wasm' ? null : await detectWebGPU();
-      const info = await engine.load(m.model, { preferBackend: m.backend, gpu });
-      self.postMessage({ type: 'ready', backend: info.backend, precision: info.precision });
+      const info = await engine.load(m.model, { preferBackend: m.backend, gpu, fixed: m.fixed });
+      self.postMessage({ type: 'ready', backend: info.backend, precision: info.precision, mode: info.mode });
     } catch (err) {
       self.postMessage({ type: 'init-error', message: String(err?.message ?? err) });
     }
@@ -26,7 +26,7 @@ self.onmessage = async (e) => {
       const data = owned(res.data);
       const pre = prepareFrame(data, res.w, res.h, m.rgba, m.w, m.h);
       self.postMessage(
-        { type: 'result', id: m.id, data, w: res.w, h: res.h, luma: pre.luma, pLo: pre.pLo, pHi: pre.pHi, ms: res.ms },
+        { type: 'result', id: m.id, data, w: res.w, h: res.h, luma: pre.luma, pLo: pre.pLo, pHi: pre.pHi, ms: res.ms, mode: engine.mode },
         [data.buffer, pre.luma.buffer]
       );
     } catch (err) {

@@ -87,3 +87,14 @@ test('no single dominant stage reads as balanced', async () => {
   for (let i = 0; i < 6; i++) await frame(p, { decode: 5, prepare: 5, depth: 6, stabilise: 5, render: 6, encode: 5, idle: 5 });
   assert.equal(bottleneck(p.snapshot({ recent: false })).key, 'balanced');
 });
+
+test('depth verdict names the concrete levers for the model and size in use', async () => {
+  clock = 0;
+  const p = new ExportProfiler();
+  Object.assign(p.info, { model: 'Depth Anything V2 Base', modelInput: '924×518', workers: 1, workersMax: 2 });
+  p.start();
+  for (let i = 0; i < 6; i++) await frame(p, { prepare: 1, depth: 300, stabilise: 10, render: 1 });
+  const v = bottleneck(p.snapshot());
+  assert.equal(v.key, 'depth');
+  for (const needle of ['more workers', 'Balanced” (43% fewer pixels', 'Depth Anything V2 Small']) assert.ok(v.text.includes(needle), needle);
+});

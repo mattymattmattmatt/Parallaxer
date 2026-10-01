@@ -377,8 +377,13 @@ export class VideoExportJob {
         const n = o.pool && !this.poolDown ? o.pool.ready.length : 0;
         prof.info.workers = n;
         prof.info.processing = n ? `${n} background worker${n > 1 ? 's' : ''}` : 'in page';
-        const backends = n ? [...new Set(o.pool.ready.map((w) => w.backend))] : [o.engine.backend];
-        prof.info.backend = backends.map((b) => (b === 'webgpu' ? 'WebGPU' : b === 'wasm' ? 'CPU (WASM)' : b)).join(' + ');
+        const runs = n ? o.pool.ready : [{ backend: o.engine.backend, precision: o.engine.precision, mode: o.engine.mode }];
+        const label = (r) =>
+          [r.backend === 'webgpu' ? 'WebGPU' : r.backend === 'wasm' ? 'CPU (WASM)' : r.backend, r.precision, { static: 'fixed size' }[r.mode]]
+            .filter(Boolean)
+            .join(' ');
+        prof.info.backend = [...new Set(runs.map(label))].join(' + ');
+        prof.info.tuning = o.tuner?.summary() ?? null;
       };
 
       const sink = new VideoSampleSink(videoTrack);
